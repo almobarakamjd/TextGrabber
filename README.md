@@ -44,9 +44,21 @@
 - **إصلاح إضافي لدقة اللمس**: طبقة التحديد لم تكن تُضاف بخاصيتي `FLAG_LAYOUT_IN_SCREEN` و`FLAG_LAYOUT_NO_LIMITS`، فكانت لا تغطي كامل الشاشة الفعلية (تتوقف قبل مناطق الشريط العلوي/السفلي)، مما يسبب عدم تطابق بين مكان لمس الإصبع الفعلي (`event.rawX/rawY`) ومكان رسم المربع على الشاشة. تمت إضافة الخاصيتين لتطابق الإحداثيات تماما.
 - إصدار: https://github.com/almobarakamjd/TextGrabber/releases/tag/v1.1.1
 
+### 2026-09-04 — سحب للإغلاق، بلاطة إعدادات سريعة، شفافية، تأكيد نسخ، تحديث ذاتي (v1.2.0)
+- **سحب الزر العائم لإغلاقه**: أثناء سحب الزر تظهر علامة × أسفل الشاشة (على طريقة حبابات ماسنجر)؛ إفلات الزر فوقها يخفيه ويحفظ هذا التفضيل.
+- **شفافية ديناميكية**: الزر بشفافية 25% في وضعه الطبيعي (`ALPHA_IDLE`) ويصبح معتما بالكامل (`ALPHA_PRESSED`) فقط أثناء اللمس الفعلي، حتى لا يحجب محتوى الشاشة باستمرار.
+- **بلاطة Quick Settings** (`FloatingButtonTileService.kt` جديد، يتطلب `BIND_QUICK_SETTINGS_TILE` في المانفست) + **مفتاح تبديل داخل التطبيق** (`FloatingButtonToggleCard` في `MainActivity.kt`): كلاهما يقرأ/يكتب نفس `SharedPreferences` (`text_grabber_service_prefs`)، وتوجد مرجعية `companion object.instance` في `MyAccessibilityService` لتحديث الزر العائم فورا دون إعادة تشغيل الخدمة.
+- **Toast فوري عند النسخ**: "✓ تم النسخ إلى الحافظة" يظهر مباشرة بعد نجاح تحديد المربع، بالإضافة إلى الإشعار الموجود مسبقا.
+- **تحديث ذاتي داخل التطبيق** (`update/UpdateChecker.kt` و`update/ApkUpdater.kt` جديدان):
+  - عند فتح التطبيق، يستعلم عن GitHub Releases API (`/repos/almobarakamjd/TextGrabber/releases/latest`) في خيط خلفية، ويقارن رقم الإصدار مع `BuildConfig.VERSION_NAME` (تفعيل `buildFeatures.buildConfig = true`).
+  - عند وجود إصدار أحدث، تظهر نافذة استئذان توضح رقم الإصدار وملاحظاته، مع خياري "تحديث الآن" أو "لاحقا".
+  - عند الموافقة: يُنزَّل ملف APK مباشرة عبر `DownloadManager` النظامي (بدون فتح أي متصفح) إلى مجلد التطبيق الخاص، ثم يُفتح تثبيته تلقائيا فور اكتمال التنزيل عبر `Intent.ACTION_VIEW` باستخدام `DownloadManager.getUriForDownloadedFile` (لا حاجة لـ FileProvider منفصل).
+  - أُضيفت صلاحيتا `INTERNET` و`REQUEST_INSTALL_PACKAGES` في المانفست؛ إن لم يكن التطبيق مسموحا له بعد بتثبيت مصادر غير معروفة، يوجَّه المستخدم تلقائيا لشاشة النظام (`Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES`) لمنح الإذن أولا.
+- إصدار: https://github.com/almobarakamjd/TextGrabber/releases/tag/v1.2.0
+
 ## روابط المشروع
 - المستودع: https://github.com/almobarakamjd/TextGrabber
-- تحميل آخر APK: https://github.com/almobarakamjd/TextGrabber/releases/tag/v1.1.1
+- تحميل آخر APK: https://github.com/almobarakamjd/TextGrabber/releases/tag/v1.2.0
 
 ## كيفية التشغيل
 راجع قسم "طريقة التشغيل والاختبار" الذي شرحه المساعد في المحادثة (فتح المشروع في Android Studio، مزامنة Gradle، تشغيله على جهاز حقيقي، تفعيل الخدمة من الإعدادات). بديلا عن ذلك، يمكن تحميل ملف APK الجاهز مباشرة من رابط الإصدار أعلاه وتثبيته على أي جهاز (بعد السماح بالتثبيت من مصادر غير معروفة).
