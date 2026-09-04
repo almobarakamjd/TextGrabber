@@ -2,22 +2,25 @@
 <resources>
     <string name="app_name">TextGrabber</string>
     <string name="accessibility_service_label">TextGrabber - نسخ النص تلقائيا</string>
-    <string name="accessibility_service_description">تتيح هذه الخدمة لتطبيق TextGrabber قراءة النص المعروض على الشاشة في التطبيقات الأخرى، ونسخه تلقائيا إلى الحافظة عند تغيره أو عند التركيز على عنصر نصي جديد. لا يتم التقاط صور للشاشة ولا تحليل الصور، فقط قراءة عناصر النص المتاحة عبر واجهة إمكانية الوصول.</string>
+    <string name="accessibility_service_description">تعرض هذه الخدمة لتطبيق TextGrabber زرا عائما فوق التطبيقات الأخرى. عند الضغط عليه ورسم مربع بإصبعك فوق نص معين، تقرأ الخدمة فقط عناصر النص الواقعة داخل ذلك المربع عبر واجهة إمكانية الوصول، وتنسخها إلى الحافظة. لا يتم التقاط صور للشاشة ولا تحليل الصور، ولا تتم قراءة أي نص خارج المربع الذي تحدده بنفسك.</string>
 
     <string name="open_accessibility_settings">فتح إعدادات إمكانية الوصول</string>
     <string name="recent_texts_title">آخر النصوص المنسوخة</string>
-    <string name="no_texts_yet">لم يتم نسخ أي نص بعد. فعّل الخدمة وابدأ باستخدام أي تطبيق آخر.</string>
+    <string name="no_texts_yet">لم يتم نسخ أي نص بعد. فعّل الخدمة، اضغط الزر العائم، وارسم مربعا فوق النص الذي تريده.</string>
 
     <string name="service_enabled">الخدمة مفعّلة</string>
-    <string name="service_enabled_desc">التطبيق يقوم الآن بمراقبة النصوص المعروضة على الشاشة ونسخها تلقائيا عند تغيرها.</string>
+    <string name="service_enabled_desc">يظهر الآن زر عائم فوق التطبيقات الأخرى. اضغط عليه وارسم مربعا فوق أي نص لنسخه.</string>
     <string name="service_disabled">الخدمة غير مفعّلة</string>
     <string name="service_disabled_desc">اضغط على الزر أدناه لفتح إعدادات إمكانية الوصول وتفعيل خدمة TextGrabber يدويا.</string>
 
     <string name="notification_channel_name">نسخ نصوص TextGrabber</string>
-    <string name="notification_channel_description">إشعارات تظهر عند نسخ نص جديد تلقائيا</string>
-    <string name="notification_title">تم نسخ نص جديد</string>
+    <string name="notification_channel_description">إشعارات تظهر عند نسخ نص جديد عبر التحديد اليدوي</string>
+    <string name="notification_title">تم نسخ النص المحدد</string>
+
+    <string name="selection_mode_hint">اسحب بإصبعك مربعا فوق النص المطلوب ثم ارفع إصبعك للنسخ</string>
+    <string name="selection_no_text_found">لم يتم العثور على أي نص داخل المربع المحدد</string>
 
     <string name="explanation_title">لماذا نطلب صلاحية إمكانية الوصول؟</string>
-    <string name="explanation_body">يستخدم TextGrabber خدمة إمكانية الوصول (Accessibility Service) في أندرويد لقراءة النص الظاهر على الشاشة من داخل التطبيقات الأخرى، وذلك عبر قراءة هيكل الواجهة النصي فقط (بدون أي تصوير للشاشة أو التقاط صور). عند اكتشاف نص جديد يتم نسخه تلقائيا إلى الحافظة لتسهيل استخدامه لاحقا، مع إظهار إشعار بسيط بذلك.\n\nلن يقوم التطبيق بإرسال أي بيانات إلى الإنترنت، ولن يعمل بأي شكل خفي عنك: يمكنك تعطيل الخدمة في أي وقت من إعدادات إمكانية الوصول في النظام.</string>
+    <string name="explanation_body">يستخدم TextGrabber خدمة إمكانية الوصول (Accessibility Service) في أندرويد ليعرض زرا عائما صغيرا فوق التطبيقات الأخرى. عند ضغطك على هذا الزر، يمكنك رسم مربع بإصبعك فوق أي نص تريده تحديدا، فتقرأ الخدمة عندها فقط عناصر النص الواقعة داخل ذلك المربع من هيكل الواجهة (بدون أي تصوير للشاشة أو OCR)، وتنسخه إلى الحافظة تلقائيا مع إظهار إشعار بذلك.\n\nلا تُقرأ أي نصوص خارج المربع الذي تحدده بنفسك، ولن يقوم التطبيق بإرسال أي بيانات إلى الإنترنت، ولن يعمل بأي شكل خفي عنك: يمكنك تعطيل الخدمة في أي وقت من إعدادات إمكانية الوصول في النظام.</string>
     <string name="explanation_understood">فهمت، متابعة</string>
 </resources>
