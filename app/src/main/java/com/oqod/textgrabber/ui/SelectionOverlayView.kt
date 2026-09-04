@@ -12,8 +12,13 @@ import android.view.View
  * طبقة شفافة تغطي كامل الشاشة أثناء "وضع التحديد".
  *
  * يرسم المستخدم بإصبعه مربعا فوق النص الذي يريد نسخه، وعند رفع الإصبع
- * يُستدعى [onSelectionComplete] بإحداثيات المربع النهائية على الشاشة.
+ * يُستدعى [onSelectionComplete] بإحداثيات المربع النهائية **على الشاشة**.
  * الضغط دون سحب (نقرة بسيطة) يُعتبر إلغاء ويستدعي [onSelectionCancelled].
+ *
+ * ملاحظة دقة: نستخدم إحداثيات اللمس المحلية (event.x / event.y) للرسم حتى
+ * يتطابق المربع المرسوم مع الإصبع تماما بغض النظر عن موضع النافذة أو
+ * أشرطة النظام، ثم نحوّل المربع النهائي إلى إحداثيات الشاشة عبر
+ * getLocationOnScreen لمطابقته مع حدود عناصر إمكانية الوصول.
  */
 class SelectionOverlayView(
     context: Context,
@@ -31,10 +36,18 @@ class SelectionOverlayView(
         style = Paint.Style.FILL
     }
 
-    private val rectBorderPaint = Paint().apply {
+    private val rectBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.parseColor("#6750A4")
         style = Paint.Style.STROKE
         strokeWidth = 4f
+    }
+
+    // خطوط إرشادية رفيعة تمتد على كامل الشاشة عند حواف المربع لتسهيل
+    // محاذاة التحديد مع بداية/نهاية سطر النص بدقة.
+    private val guidePaint = Paint().apply {
+        color = Color.parseColor("#806750A4")
+        style = Paint.Style.STROKE
+        strokeWidth = 1.5f
     }
 
     private var startX = 0f
@@ -42,6 +55,8 @@ class SelectionOverlayView(
     private var currentX = 0f
     private var currentY = 0f
     private var isDragging = false
+
+    private val locationOnScreen = IntArray(2)
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
@@ -51,16 +66,22 @@ class SelectionOverlayView(
             val top = minOf(startY, currentY)
             val right = maxOf(startX, currentX)
             val bottom = maxOf(startY, currentY)
+
+            canvas.drawLine(0f, top, width.toFloat(), top, guidePaint)
+            canvas.drawLine(0f, bottom, width.toFloat(), bottom, guidePaint)
+            canvas.drawLine(left, 0f, left, height.toFloat(), guidePaint)
+            canvas.drawLine(right, 0f, right, height.toFloat(), guidePaint)
+
             canvas.drawRect(left, top, right, bottom, rectPaint)
             canvas.drawRect(left, top, right, bottom, rectBorderPaint)
         }
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        when (event.action) {
+        when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                startX = event.rawX
-                startY = event.rawY
+                startX = event.x
+                startY = event.y
                 currentX = startX
                 currentY = startY
                 isDragging = true
@@ -68,28 +89,41 @@ class SelectionOverlayView(
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
-                currentX = event.rawX
-                currentY = event.rawY
+                currentX = event.x
+                currentY = event.y
                 invalidate()
                 return true
             }
             MotionEvent.ACTION_UP -> {
-                val rect = Rect(
-                    minOf(startX, currentX).toInt(),
-                    minOf(startY, currentY).toInt(),
-                    maxOf(startX, currentX).toInt(),
-                    maxOf(startY, currentY).toInt()
-                )
                 isDragging = false
-                if (rect.width() < MIN_SELECTION_SIZE_PX || rect.height() < MIN_SELECTION_SIZE_PX) {
+                invalidate()
+
+                val localLeft = minOf(startX, currentX)
+                val localTop = minOf(startY, currentY)
+                val localRight = maxOf(startX, currentX)
+                val localBottom = maxOf(startY, currentY)
+
+                if (localRight - localLeft < MIN_SELECTION_SIZE_PX ||
+                    localBottom - localTop < MIN_SELECTION_SIZE_PX
+                ) {
                     onSelectionCancelled()
-                } else {
-                    onSelectionComplete(rect)
+                    return true
                 }
+
+                // تحويل المربع من إحداثيات هذه الطبقة إلى إحداثيات الشاشة الفعلية
+                getLocationOnScreen(locationOnScreen)
+                val screenRect = Rect(
+                    (localLeft + locationOnScreen[0]).toInt(),
+                    (localTop + locationOnScreen[1]).toInt(),
+                    (localRight + locationOnScreen[0]).toInt(),
+                    (localBottom + locationOnScreen[1]).toInt()
+                )
+                onSelectionComplete(screenRect)
                 return true
             }
             MotionEvent.ACTION_CANCEL -> {
                 isDragging = false
+                invalidate()
                 onSelectionCancelled()
                 return true
             }

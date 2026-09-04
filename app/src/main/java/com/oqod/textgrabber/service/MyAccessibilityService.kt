@@ -11,8 +11,11 @@ import android.content.Intent
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.graphics.RectF
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.Bundle
+import androidx.core.os.BundleCompat
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
@@ -374,9 +377,16 @@ class MyAccessibilityService : AccessibilityService() {
         node.getBoundsInScreen(bounds)
 
         if (Rect.intersects(bounds, target)) {
-            val text = node.text?.toString()?.trim()
+            val text = node.text?.toString()
             if (!text.isNullOrBlank()) {
-                results.add(text)
+                // المستوى الأدق: كلمات فقط بناء على مواقع الأحرف الفعلية على الشاشة
+                val precise = extractWordsInsideRect(node, text, target)
+                when {
+                    precise != null -> if (precise.isNotBlank()) results.add(precise)
+                    // احتياطي عندما لا يوفر التطبيق مواقع الأحرف: نأخذ نص العنصر
+                    // كاملا فقط إن كان جزء معتبر منه داخل المربع (وليس مجرد تلامس حافة).
+                    isMeaningfullyInside(bounds, target) -> results.add(text.trim())
+                }
             }
         }
 
@@ -385,6 +395,82 @@ class MyAccessibilityService : AccessibilityService() {
             collectTextInRect(child, target, results)
             child.recycle()
         }
+    }
+
+    /**
+     * يطلب من النظام إحداثيات كل حرف في نص العنصر على الشاشة، ثم يعيد فقط
+     * الكلمات التي يقع مركزها داخل مربع التحديد، محافظا على الفواصل الأصلية
+     * بين الكلمات المتجاورة. يعيد null إن لم يوفر التطبيق المصدر هذه البيانات.
+     */
+    private fun extractWordsInsideRect(node: AccessibilityNodeInfo, originalText: String, target: Rect): String? {
+        val length = minOf(
+            originalText.length,
+            AccessibilityNodeInfo.EXTRA_DATA_TEXT_CHARACTER_LOCATION_ARG_MAX_LENGTH
+        )
+        if (length == 0) return null
+
+        val args = Bundle().apply {
+            putInt(AccessibilityNodeInfo.EXTRA_DATA_TEXT_CHARACTER_LOCATION_ARG_START_INDEX, 0)
+            putInt(AccessibilityNodeInfo.EXTRA_DATA_TEXT_CHARACTER_LOCATION_ARG_LENGTH, length)
+        }
+        val refreshed = runCatching {
+            node.refreshWithExtraData(AccessibilityNodeInfo.EXTRA_DATA_TEXT_CHARACTER_LOCATION_KEY, args)
+        }.getOrDefault(false)
+        if (!refreshed) return null
+
+        // النص قد يتغير بعد التحديث، لذا نعيد قراءته
+        val text = node.text?.toString() ?: return null
+        val charRects = BundleCompat.getParcelableArray(
+            node.extras,
+            AccessibilityNodeInfo.EXTRA_DATA_TEXT_CHARACTER_LOCATION_KEY,
+            RectF::class.java
+        ) ?: return null
+        if (charRects.isEmpty()) return null
+
+        val usable = minOf(text.length, charRects.size)
+        val builder = StringBuilder()
+        var lastIncludedEnd = -1
+
+        var i = 0
+        while (i < usable) {
+            if (text[i].isWhitespace()) { i++; continue }
+            val wordStart = i
+            while (i < usable && !text[i].isWhitespace()) i++
+            val wordEnd = i // حصري
+
+            // اتحاد مستطيلات أحرف هذه الكلمة
+            var union: RectF? = null
+            for (c in wordStart until wordEnd) {
+                val r = charRects[c] as? RectF ?: continue
+                if (union == null) union = RectF(r) else union.union(r)
+            }
+            if (union == null) continue
+
+            val centerX = union.centerX().toInt()
+            val centerY = union.centerY().toInt()
+            if (target.contains(centerX, centerY)) {
+                if (builder.isNotEmpty()) {
+                    // إن كانت الكلمة السابقة المضمّنة تسبق هذه مباشرة، احتفظ بالفاصل الأصلي
+                    // (مسافة أو سطر جديد)، وإلا استخدم مسافة واحدة.
+                    val gap = text.substring(lastIncludedEnd, wordStart)
+                    builder.append(if (gap.isNotEmpty() && gap.all { it.isWhitespace() } && lastIncludedEnd >= 0) gap else " ")
+                }
+                builder.append(text, wordStart, wordEnd)
+                lastIncludedEnd = wordEnd
+            }
+        }
+        return builder.toString()
+    }
+
+    /** يعتبر العنصر داخل المربع إن كان مركزه بداخله أو تغطية المربع له 50% أو أكثر. */
+    private fun isMeaningfullyInside(bounds: Rect, target: Rect): Boolean {
+        if (target.contains(bounds.centerX(), bounds.centerY())) return true
+        val intersection = Rect()
+        if (!intersection.setIntersect(bounds, target)) return false
+        val nodeArea = bounds.width().toLong() * bounds.height().toLong()
+        if (nodeArea <= 0) return false
+        val interArea = intersection.width().toLong() * intersection.height().toLong()
+        return interArea * 2 >= nodeArea
     }
 
     // ---------------------------------------------------------------------
