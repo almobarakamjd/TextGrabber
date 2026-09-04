@@ -95,7 +95,12 @@ class MyAccessibilityService : AccessibilityService() {
             sizePx,
             sizePx,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            // FLAG_NOT_TOUCH_MODAL: يسمح بمرور اللمس للتطبيقات الأخرى خارج حدود الزر.
+            // FLAG_NOT_FOCUSABLE: أساسي جدا - بدونه تسرق هذه النافذة الصغيرة تركيز
+            // لوحة المفاتيح وزر الرجوع من كامل النظام، فيتعطل الكتابة في أي تطبيق آخر
+            // ويتوقف زر الرجوع عن العمل طالما الزر العائم ظاهرا على الشاشة.
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -176,9 +181,20 @@ class MyAccessibilityService : AccessibilityService() {
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-            0,
+            // FLAG_NOT_FOCUSABLE: تمنع هذه النافذة من سرقة تركيز لوحة المفاتيح/زر
+            // الرجوع (اللمس يبقى يعمل بدون الحاجة للتركيز).
+            // FLAG_LAYOUT_IN_SCREEN + FLAG_LAYOUT_NO_LIMITS: تجعل النافذة تغطي كامل
+            // الشاشة الفعلية بما فيها مناطق الشريط العلوي/السفلي، بحيث تتطابق
+            // إحداثيات اللمس (rawX/rawY) تماما مع إحداثيات الرسم على الشاشة.
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
-        )
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = 0
+            y = 0
+        }
 
         runCatching { windowManager.addView(overlay, params) }
         selectionOverlayView = overlay
