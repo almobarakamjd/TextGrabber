@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- أيقونة بسيطة على شكل حرف T داخل مربع نص، ترمز لـ TextGrabber -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M30,34 h48 v10 h-19 v40 h-10 v-40 h-19 z" />
+</vector>

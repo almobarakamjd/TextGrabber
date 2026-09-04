@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- سمة أساسية تعتمد عليها الأنشطة قبل تحميل Compose Theme -->
+    <style name="Theme.TextGrabber" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

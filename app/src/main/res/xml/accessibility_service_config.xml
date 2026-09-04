@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    إعدادات خدمة إمكانية الوصول.
+    نطلب فقط الأحداث التي نحتاجها لقراءة النص المعروض/المُركَّز عليه:
+    - TYPE_WINDOW_CONTENT_CHANGED: تغيّر محتوى النافذة الحالية
+    - TYPE_VIEW_FOCUSED: تركيز المستخدم على عنصر جديد
+    - TYPE_VIEW_TEXT_SELECTION_CHANGED: تغيّر تحديد النص داخل عنصر نصي
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowContentChanged|typeViewFocused|typeViewTextSelectionChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/accessibility_service_description"
+    android:notificationTimeout="200"
+    android:packageNames=""
+    />
