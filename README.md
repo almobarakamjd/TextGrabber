@@ -56,9 +56,15 @@
   - أُضيفت صلاحيتا `INTERNET` و`REQUEST_INSTALL_PACKAGES` في المانفست؛ إن لم يكن التطبيق مسموحا له بعد بتثبيت مصادر غير معروفة، يوجَّه المستخدم تلقائيا لشاشة النظام (`Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES`) لمنح الإذن أولا.
 - إصدار: https://github.com/almobarakamjd/TextGrabber/releases/tag/v1.2.0
 
+### 2026-09-04 — دقة تحديد أعلى: كلمات فقط بناء على مواقع الأحرف (v1.2.1)
+- **تطابق الرسم مع الإصبع**: `SelectionOverlayView` تستخدم الآن إحداثيات اللمس المحلية (`event.x/y`) للرسم، ثم تحوّل المربع النهائي لإحداثيات الشاشة عبر `getLocationOnScreen` — يزيل أي انحراف ناتج عن أشرطة النظام مهما كان وضع النافذة. أُضيفت خطوط إرشادية رفيعة عند حواف المربع لتسهيل محاذاته مع بداية/نهاية السطر.
+- **استخراج على مستوى الكلمة** (`extractWordsInsideRect` في `MyAccessibilityService.kt`): يطلب من النظام مواقع كل حرف على الشاشة عبر `refreshWithExtraData(EXTRA_DATA_TEXT_CHARACTER_LOCATION_KEY)`، ويجمّع مستطيلات أحرف كل كلمة، ويُضمِّن الكلمة فقط إن كان مركزها داخل مربع التحديد، مع الحفاظ على الفواصل الأصلية بين الكلمات المتجاورة. هذا يمنع نسخ فقرة كاملة لمجرد تلامس حافتها.
+- **احتياطي معقول** (`isMeaningfullyInside`): عندما لا يوفر التطبيق المصدر مواقع الأحرف، يُضمَّن العنصر كاملا فقط إن كان مركزه داخل المربع أو غطى المربع 50% منه أو أكثر (بدل أي تقاطع `Rect.intersects` بسيط كما كان).
+- إصدار: https://github.com/almobarakamjd/TextGrabber/releases/tag/v1.2.1
+
 ## روابط المشروع
 - المستودع: https://github.com/almobarakamjd/TextGrabber
-- تحميل آخر APK: https://github.com/almobarakamjd/TextGrabber/releases/tag/v1.2.0
+- تحميل آخر APK: https://github.com/almobarakamjd/TextGrabber/releases/tag/v1.2.1
 
 ## كيفية التشغيل
 راجع قسم "طريقة التشغيل والاختبار" الذي شرحه المساعد في المحادثة (فتح المشروع في Android Studio، مزامنة Gradle، تشغيله على جهاز حقيقي، تفعيل الخدمة من الإعدادات). بديلا عن ذلك، يمكن تحميل ملف APK الجاهز مباشرة من رابط الإصدار أعلاه وتثبيته على أي جهاز (بعد السماح بالتثبيت من مصادر غير معروفة).
