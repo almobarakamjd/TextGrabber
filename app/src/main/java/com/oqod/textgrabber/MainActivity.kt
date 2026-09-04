@@ -27,11 +27,15 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.foundation.layout.Row
+import android.widget.Toast
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -49,6 +53,14 @@ import com.oqod.textgrabber.data.CopiedTextEntry
 import com.oqod.textgrabber.data.CopiedTextStore
 import com.oqod.textgrabber.service.MyAccessibilityService
 import com.oqod.textgrabber.ui.theme.TextGrabberTheme
+import com.oqod.textgrabber.update.LatestRelease
+import com.oqod.textgrabber.update.canInstallFromUnknownSources
+import com.oqod.textgrabber.update.downloadAndInstallUpdate
+import com.oqod.textgrabber.update.fetchLatestReleaseBlocking
+import com.oqod.textgrabber.update.isNewerVersion
+import com.oqod.textgrabber.update.requestInstallPermission
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -112,6 +124,15 @@ fun TextGrabberApp() {
 
     val copiedTexts = CopiedTextStore.items
 
+    // التحقق من وجود إصدار أحدث على GitHub مرة واحدة عند فتح التطبيق.
+    var availableUpdate by remember { mutableStateOf<LatestRelease?>(null) }
+    LaunchedEffect(Unit) {
+        val release = withContext(Dispatchers.IO) { fetchLatestReleaseBlocking() }
+        if (release != null && isNewerVersion(release.versionName, BuildConfig.VERSION_NAME)) {
+            availableUpdate = release
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(title = { Text(stringResource(id = R.string.app_name)) })
@@ -125,6 +146,10 @@ fun TextGrabberApp() {
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             StatusCard(isEnabled = isAccessibilityEnabled)
+
+            if (isAccessibilityEnabled) {
+                FloatingButtonToggleCard()
+            }
 
             Button(
                 onClick = {
@@ -164,6 +189,31 @@ fun TextGrabberApp() {
                 showExplanationDialog = false
                 prefs.edit().putBoolean("explanation_shown", true).apply()
             }
+        )
+    }
+
+    availableUpdate?.let { release ->
+        UpdateAvailableDialog(
+            release = release,
+            onConfirm = {
+                availableUpdate = null
+                if (canInstallFromUnknownSources(context)) {
+                    downloadAndInstallUpdate(context, release.apkDownloadUrl)
+                    Toast.makeText(
+                        context,
+                        context.getString(R.string.update_downloading_toast),
+                        Toast.LENGTH_LONG
+                    ).show()
+                } else {
+                    Toast.makeText(
+                        context,
+                        context.getString(R.string.update_permission_needed_toast),
+                        Toast.LENGTH_LONG
+                    ).show()
+                    requestInstallPermission(context)
+                }
+            },
+            onDismiss = { availableUpdate = null }
         )
     }
 }
@@ -207,6 +257,53 @@ private fun StatusCard(isEnabled: Boolean) {
 }
 
 @Composable
+private fun FloatingButtonToggleCard() {
+    val context = LocalContext.current
+    var isFloatingButtonEnabled by remember {
+        mutableStateOf(MyAccessibilityService.isFloatingButtonEnabled(context))
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                isFloatingButtonEnabled = MyAccessibilityService.isFloatingButtonEnabled(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = stringResource(id = R.string.floating_button_toggle_title),
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = stringResource(id = R.string.floating_button_toggle_desc),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Switch(
+                checked = isFloatingButtonEnabled,
+                onCheckedChange = { checked ->
+                    isFloatingButtonEnabled = checked
+                    MyAccessibilityService.setFloatingButtonEnabled(context, checked)
+                }
+            )
+        }
+    }
+}
+
+@Composable
 private fun CopiedTextItem(entry: CopiedTextEntry) {
     val timeFormatter = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -234,6 +331,37 @@ private fun AccessibilityExplanationDialog(onDismiss: () -> Unit) {
         confirmButton = {
             TextButton(onClick = onDismiss) {
                 Text(stringResource(id = R.string.explanation_understood))
+            }
+        }
+    )
+}
+
+@Composable
+private fun UpdateAvailableDialog(
+    release: LatestRelease,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(id = R.string.update_available_title)) },
+        text = {
+            Text(
+                stringResource(
+                    id = R.string.update_available_message,
+                    release.versionName,
+                    release.releaseNotes.ifBlank { "-" }
+                )
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text(stringResource(id = R.string.update_now))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(id = R.string.update_later))
             }
         }
     )

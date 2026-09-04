@@ -4,6 +4,11 @@
     <!-- صلاحية إظهار الإشعارات (مطلوبة من Android 13 فأعلى) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- صلاحيات التحديث الذاتي: الاتصال بالإنترنت للتحقق من وجود إصدار
+         جديد على GitHub، وتثبيت ملف APK المُنزَّل مباشرة داخل التطبيق. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
@@ -39,6 +44,22 @@
             <meta-data
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <!--
+            بلاطة الإعدادات السريعة (Quick Settings Tile) لتشغيل/إيقاف
+            الزر العائم مباشرة دون فتح التطبيق. يضيفها المستخدم يدويا
+            من "تعديل" في لوحة الإعدادات السريعة.
+        -->
+        <service
+            android:name=".service.FloatingButtonTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_launcher_foreground"
+            android:label="@string/qs_tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
         </service>
 
     </application>

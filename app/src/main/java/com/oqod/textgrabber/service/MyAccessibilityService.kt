@@ -49,6 +49,31 @@ class MyAccessibilityService : AccessibilityService() {
         // حد أدنى لحركة الإصبع (بالبكسل) لاعتبارها سحبا لمربع تحديد
         // وليست مجرد ضغطة عرضية أثناء تحريك الزر العائم.
         private const val DRAG_THRESHOLD_PX = 12
+
+        // شفافية الزر العائم في حالته الطبيعية (خفيفة جدا) وأثناء اللمس (معتم بالكامل).
+        private const val ALPHA_IDLE = 0.25f
+        private const val ALPHA_PRESSED = 1f
+
+        private const val PREFS_NAME = "text_grabber_service_prefs"
+        private const val KEY_FLOATING_BUTTON_ENABLED = "floating_button_enabled"
+
+        // مرجع للخدمة الجارية حاليا، تستخدمه شاشة الإعدادات وبلاطة
+        // الإعدادات السريعة (Quick Settings Tile) لإظهار/إخفاء الزر العائم
+        // فورا دون الحاجة لإعادة تشغيل الخدمة.
+        @Volatile
+        private var instance: MyAccessibilityService? = null
+
+        fun isFloatingButtonEnabled(context: Context): Boolean {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getBoolean(KEY_FLOATING_BUTTON_ENABLED, true)
+        }
+
+        /** تفعيل/إخفاء الزر العائم من أي مكان في التطبيق (الواجهة أو بلاطة الإعدادات السريعة). */
+        fun setFloatingButtonEnabled(context: Context, enabled: Boolean) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putBoolean(KEY_FLOATING_BUTTON_ENABLED, enabled).apply()
+            instance?.applyFloatingButtonVisibility(enabled)
+        }
     }
 
     private lateinit var windowManager: WindowManager
@@ -57,14 +82,23 @@ class MyAccessibilityService : AccessibilityService() {
     private var floatingButtonView: TextView? = null
     private var floatingButtonParams: WindowManager.LayoutParams? = null
 
+    // منطقة "الإغلاق بالسحب" (علامة X) التي تظهر أسفل الشاشة أثناء سحب الزر
+    private var closeZoneView: TextView? = null
+    private var closeZoneParams: WindowManager.LayoutParams? = null
+
     // طبقة التحديد الشفافة التي تظهر فوق كامل الشاشة أثناء رسم المربع
     private var selectionOverlayView: SelectionOverlayView? = null
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        instance = this
         createNotificationChannelIfNeeded()
-        addFloatingButton()
+        applyFloatingButtonVisibility(isFloatingButtonEnabled(this))
+    }
+
+    private fun applyFloatingButtonVisibility(enabled: Boolean) {
+        if (enabled) addFloatingButton() else removeFloatingButton()
     }
 
     /** لا حاجة للتصرف بناء على أحداث الواجهة؛ التحديد يدوي بالكامل عبر الزر العائم. */
@@ -89,6 +123,9 @@ class MyAccessibilityService : AccessibilityService() {
                 shape = GradientDrawable.OVAL
                 setColor(Color.parseColor("#6750A4"))
             }
+            // شفاف جدا في وضعه الطبيعي حتى لا يحجب محتوى الشاشة، ويصبح
+            // معتما بالكامل فقط أثناء لمسه فعليا (اضغط أو اسحب).
+            alpha = ALPHA_IDLE
         }
 
         val params = WindowManager.LayoutParams(
@@ -122,25 +159,48 @@ class MyAccessibilityService : AccessibilityService() {
                     startX = params.x
                     startY = params.y
                     moved = false
+                    button.alpha = ALPHA_PRESSED
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = (event.rawX - downRawX).toInt()
                     val dy = (event.rawY - downRawY).toInt()
                     if (abs(dx) > DRAG_THRESHOLD_PX || abs(dy) > DRAG_THRESHOLD_PX) {
-                        moved = true
+                        if (!moved) {
+                            // أول لحظة يتحول فيها اللمس إلى سحب فعلي: أظهر منطقة
+                            // الإغلاق (X) أسفل الشاشة، على طريقة "حباب" ماسنجر.
+                            moved = true
+                            showCloseZone()
+                        }
                     }
                     if (moved) {
                         params.x = startX + dx
                         params.y = startY + dy
                         runCatching { windowManager.updateViewLayout(button, params) }
+                        updateCloseZoneHighlight(sizePx)
                     }
                     true
                 }
                 MotionEvent.ACTION_UP -> {
-                    if (!moved) {
+                    if (moved) {
+                        if (isOverCloseZone(sizePx)) {
+                            setFloatingButtonEnabled(this, false)
+                            Toast.makeText(
+                                this,
+                                getString(R.string.floating_button_hidden_hint),
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                        hideCloseZone()
+                    } else {
                         startSelectionMode()
                     }
+                    button.alpha = ALPHA_IDLE
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    hideCloseZone()
+                    button.alpha = ALPHA_IDLE
                     true
                 }
                 else -> false
@@ -153,9 +213,82 @@ class MyAccessibilityService : AccessibilityService() {
     }
 
     private fun removeFloatingButton() {
+        hideCloseZone()
         floatingButtonView?.let { runCatching { windowManager.removeView(it) } }
         floatingButtonView = null
         floatingButtonParams = null
+    }
+
+    // ---------------------------------------------------------------------
+    // منطقة "اسحب هنا للإغلاق" (X) — تظهر فقط أثناء سحب الزر العائم
+    // ---------------------------------------------------------------------
+
+    private fun showCloseZone() {
+        if (closeZoneView != null) return
+
+        val sizePx = dpToPx(64)
+        val view = TextView(this).apply {
+            text = "×"
+            setTextColor(Color.WHITE)
+            textSize = 26f
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.parseColor("#B3D93025"))
+            }
+        }
+
+        val screenHeight = resources.displayMetrics.heightPixels
+        val screenWidth = resources.displayMetrics.widthPixels
+        val params = WindowManager.LayoutParams(
+            sizePx,
+            sizePx,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = (screenWidth - sizePx) / 2
+            y = screenHeight - dpToPx(140)
+        }
+
+        runCatching { windowManager.addView(view, params) }
+        closeZoneView = view
+        closeZoneParams = params
+    }
+
+    private fun hideCloseZone() {
+        closeZoneView?.let { runCatching { windowManager.removeView(it) } }
+        closeZoneView = null
+        closeZoneParams = null
+    }
+
+    /** تكبير علامة X قليلا عندما يقترب الزر العائم منها، كإشارة بصرية للمستخدم. */
+    private fun updateCloseZoneHighlight(buttonSizePx: Int) {
+        val zoneView = closeZoneView ?: return
+        val targetScale = if (isOverCloseZone(buttonSizePx)) 1.3f else 1f
+        if (zoneView.scaleX != targetScale) {
+            zoneView.scaleX = targetScale
+            zoneView.scaleY = targetScale
+        }
+    }
+
+    /** يتحقق إن كان مركز الزر العائم متداخلا مع منطقة الإغلاق حاليا. */
+    private fun isOverCloseZone(buttonSizePx: Int): Boolean {
+        val buttonParams = floatingButtonParams ?: return false
+        val zoneParams = closeZoneParams ?: return false
+
+        val buttonCenterX = buttonParams.x + buttonSizePx / 2
+        val buttonCenterY = buttonParams.y + buttonSizePx / 2
+        val zoneCenterX = zoneParams.x + zoneParams.width / 2
+        val zoneCenterY = zoneParams.y + zoneParams.height / 2
+
+        val dx = (buttonCenterX - zoneCenterX).toDouble()
+        val dy = (buttonCenterY - zoneCenterY).toDouble()
+        val distance = kotlin.math.sqrt(dx * dx + dy * dy)
+        val threshold = (buttonSizePx / 2) + (zoneParams.width / 2)
+        return distance < threshold
     }
 
     // ---------------------------------------------------------------------
@@ -217,6 +350,8 @@ class MyAccessibilityService : AccessibilityService() {
         copyToClipboard(text)
         CopiedTextStore.addText(text)
         showCopyNotification(text)
+        // تأكيد فوري على الشاشة بأن النسخ نجح، بالإضافة إلى الإشعار.
+        Toast.makeText(this, getString(R.string.copied_to_clipboard_toast), Toast.LENGTH_SHORT).show()
     }
 
     /**
@@ -333,6 +468,7 @@ class MyAccessibilityService : AccessibilityService() {
         selectionOverlayView?.let { runCatching { windowManager.removeView(it) } }
         selectionOverlayView = null
         removeFloatingButton()
+        instance = null
         return super.onUnbind(intent)
     }
 }

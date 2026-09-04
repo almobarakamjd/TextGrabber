@@ -19,6 +19,19 @@
 
     <string name="selection_mode_hint">اسحب بإصبعك مربعا فوق النص المطلوب ثم ارفع إصبعك للنسخ</string>
     <string name="selection_no_text_found">لم يتم العثور على أي نص داخل المربع المحدد</string>
+    <string name="copied_to_clipboard_toast">✓ تم النسخ إلى الحافظة</string>
+
+    <string name="update_available_title">يتوفر تحديث جديد</string>
+    <string name="update_available_message">إصدار جديد (%1$s) متاح للتحميل. هل تريد تنزيله وتثبيته الآن؟\n\nما الجديد:\n%2$s</string>
+    <string name="update_now">تحديث الآن</string>
+    <string name="update_later">لاحقا</string>
+    <string name="update_download_title">تنزيل تحديث TextGrabber</string>
+    <string name="update_downloading_toast">جاري تنزيل التحديث في الخلفية… سيُفتح التثبيت تلقائيا عند الانتهاء</string>
+    <string name="update_permission_needed_toast">فعّل السماح بتثبيت تطبيقات من هذا المصدر ثم أعد المحاولة</string>
+    <string name="floating_button_hidden_hint">تم إخفاء الزر العائم. يمكنك إعادة إظهاره من التطبيق أو من بلاطة الإعدادات السريعة</string>
+    <string name="qs_tile_label">زر TextGrabber العائم</string>
+    <string name="floating_button_toggle_title">إظهار الزر العائم</string>
+    <string name="floating_button_toggle_desc">اسحب الزر إلى علامة × أسفل الشاشة لإخفائه، أو أعد إظهاره من هنا أو من بلاطة الإعدادات السريعة</string>
 
     <string name="explanation_title">لماذا نطلب صلاحية إمكانية الوصول؟</string>
     <string name="explanation_body">يستخدم TextGrabber خدمة إمكانية الوصول (Accessibility Service) في أندرويد ليعرض زرا عائما صغيرا فوق التطبيقات الأخرى. عند ضغطك على هذا الزر، يمكنك رسم مربع بإصبعك فوق أي نص تريده تحديدا، فتقرأ الخدمة عندها فقط عناصر النص الواقعة داخل ذلك المربع من هيكل الواجهة (بدون أي تصوير للشاشة أو OCR)، وتنسخه إلى الحافظة تلقائيا مع إظهار إشعار بذلك.\n\nلا تُقرأ أي نصوص خارج المربع الذي تحدده بنفسك، ولن يقوم التطبيق بإرسال أي بيانات إلى الإنترنت، ولن يعمل بأي شكل خفي عنك: يمكنك تعطيل الخدمة في أي وقت من إعدادات إمكانية الوصول في النظام.</string>
