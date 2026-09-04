@@ -1,6 +1,6 @@
 # TextGrabber
 
-تطبيق أندرويد (Kotlin + Jetpack Compose) يقرأ النص المعروض على الشاشة تلقائيا من أي تطبيق آخر مفتوح، عبر خدمة إمكانية الوصول (Accessibility Service)، وينسخه إلى الحافظة (Clipboard) مع إشعار بسيط.
+تطبيق أندرويد (Kotlin + Jetpack Compose) يتيح تحديد أي نص معروض في أي تطبيق آخر مفتوح، عبر خدمة إمكانية الوصول (Accessibility Service) وزر عائم يُستخدم لرسم مربع تحديد بإصبعك، وينسخ النص الواقع داخل ذلك المربع فقط إلى الحافظة (Clipboard) مع إشعار بسيط.
 
 ## سجل التعديلات
 
@@ -24,9 +24,22 @@
 - تم رفع المشروع إلى GitHub: https://github.com/almobarakamjd/TextGrabber
 - تم إنشاء إصدار (Release) `v1.0.0` مع إرفاق ملف APK جاهز للتحميل: https://github.com/almobarakamjd/TextGrabber/releases/tag/v1.0.0
 
+### 2026-09-04 — إصلاح: الخدمة لا تستقبل أي أحداث (v1.0.1)
+- بعد التجربة الفعلية على جهاز حقيقي، تبيّن أن الخدمة لا تنسخ أي شيء رغم تفعيلها. السبب: `android:packageNames=""` في `accessibility_service_config.xml` كان يُفسَّر كقائمة تطبيقات فارغة، فتُمنع الخدمة من استقبال أي أحداث من أي تطبيق. تم حذف الخاصية بالكامل.
+- إصدار: https://github.com/almobarakamjd/TextGrabber/releases/tag/v1.0.1
+
+### 2026-09-04 — تحويل من النسخ التلقائي إلى تحديد يدوي بمربع (v1.1.0)
+- بعد التجربة الفعلية، تبيّن أن النسخ التلقائي عند أي تغيّر نص (`onAccessibilityEvent`) يلتقط عناصر غير مقصودة (نصوص إعلانات، تسميات أزرار مثل "Open screenshot editor"، طوابع زمنية...) وليس بالضرورة المحتوى الذي يريده المستخدم فعليا.
+- **التغيير**: حذف منطق النسخ التلقائي بالكامل من `onAccessibilityEvent`. بدلا منه:
+  - الخدمة تضيف الآن **زرا عائما دائريا قابلا للسحب** فوق كل التطبيقات الأخرى عبر `WindowManager` بنوع نافذة `TYPE_ACCESSIBILITY_OVERLAY` (لا يحتاج صلاحية `SYSTEM_ALERT_WINDOW` المنفصلة لأنه صادر من خدمة إمكانية وصول).
+  - الضغط على الزر يفتح **وضع تحديد**: طبقة شفافة تغطي الشاشة (`SelectionOverlayView.kt` جديد) يرسم فيها المستخدم مربعا بإصبعه.
+  - عند رفع الإصبع، تُقرأ فقط عناصر `AccessibilityNodeInfo` (من `rootInActiveWindow`) التي تتقاطع حدودها مع المربع المرسوم، ويُنسخ نصها فقط للحافظة.
+  - تم تحديث كل نصوص الشرح والشفافية (`strings.xml`، نافذة الشرح الأولى، وصف الخدمة في الإعدادات) لتعكس السلوك الجديد.
+- إصدار: https://github.com/almobarakamjd/TextGrabber/releases/tag/v1.1.0
+
 ## روابط المشروع
 - المستودع: https://github.com/almobarakamjd/TextGrabber
-- تحميل آخر APK: https://github.com/almobarakamjd/TextGrabber/releases/tag/v1.0.0
+- تحميل آخر APK: https://github.com/almobarakamjd/TextGrabber/releases/tag/v1.1.0
 
 ## كيفية التشغيل
 راجع قسم "طريقة التشغيل والاختبار" الذي شرحه المساعد في المحادثة (فتح المشروع في Android Studio، مزامنة Gradle، تشغيله على جهاز حقيقي، تفعيل الخدمة من الإعدادات). بديلا عن ذلك، يمكن تحميل ملف APK الجاهز مباشرة من رابط الإصدار أعلاه وتثبيته على أي جهاز (بعد السماح بالتثبيت من مصادر غير معروفة).
