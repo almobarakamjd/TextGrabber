@@ -5,5 +5,7 @@
 - [ ] استبدال أيقونة التطبيق (Vector Drawable البسيطة الحالية) بأيقونة تصميم نهائية.
 - [ ] إضافة زر "مسح القائمة" لمسح آخر النصوص المنسوخة من الواجهة (الدالة `CopiedTextStore.clear()` جاهزة بالفعل ولم تُربط بزر بعد).
 - [ ] النظر في الانتقال من `SnapshotStateList` في الذاكرة إلى قاعدة بيانات Room إن أراد المستخدم حفظ السجل بعد إغلاق التطبيق.
-- [ ] توليد ملفات `gradlew` / `gradlew.bat` / `gradle-wrapper.jar` الثنائية فعليا (لم تُنشأ لأنها ملفات ثنائية؛ ستُنشأ تلقائيا عند فتح المشروع في Android Studio أو بتشغيل `gradle wrapper`).
-- [ ] لاحقا حسب سياسة "oqod": بناء APK محليا (`flutter` غير منطبق هنا لأنه مشروع Android أصلي وليس Flutter، لذا الأمر هو `./gradlew assembleRelease` بدلا من `flutter build apk`) — يبقى متوقفا حتى أمر صريح.
+- [ ] توليد سكربتات `gradlew` / `gradlew.bat` القياسية (لدينا `gradle-wrapper.jar` فقط حاليا؛ البناء تم عبر تشغيل Gradle 8.14.5 المخزن محليا في `~/.gradle/wrapper/dists` مباشرة). ستُنشأ سكربتات gradlew تلقائيا عند فتح المشروع في Android Studio.
+- [x] بناء APK (release) ورفعه: تم فعليا بأمر صريح من أبو فيصل بتاريخ 2026-09-04. الأمر المستخدم كان تشغيل Gradle مباشرة (`gradle assembleRelease`) وليس `./gradlew` لعدم وجود سكربتات wrapper بعد.
+- [x] رفع المشروع إلى GitHub وإنشاء Release مع إرفاق APK: تم بتاريخ 2026-09-04. الرابط: https://github.com/almobarakamjd/TextGrabber/releases/tag/v1.0.0
+- [ ] استبدال توقيع الإصدار (حاليا يستخدم مفتاح Debug القياسي) بمفتاح توقيع رسمي (Keystore) عند الرغبة بالنشر على متجر Google Play مستقبلا.
