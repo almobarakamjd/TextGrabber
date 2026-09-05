@@ -1,13 +1,17 @@
 package com.oqod.textgrabber.service
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityService.ScreenshotResult
+import android.accessibilityservice.AccessibilityService.TakeScreenshotCallback
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Rect
@@ -15,8 +19,11 @@ import android.graphics.RectF
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
+import androidx.annotation.RequiresApi
 import androidx.core.os.BundleCompat
+import android.provider.MediaStore
 import android.util.TypedValue
+import android.view.Display
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -30,6 +37,7 @@ import com.oqod.textgrabber.data.CopiedTextStore
 import com.oqod.textgrabber.ui.SelectionOverlayView
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import java.util.concurrent.Executors
 import kotlin.math.abs
 
 /**
@@ -46,7 +54,8 @@ class MyAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val CHANNEL_ID = "text_grabber_channel"
-        private const val NOTIFICATION_ID = 1001
+        private const val NOTIFICATION_ID_TEXT = 1001
+        private const val NOTIFICATION_ID_IMAGE = 1002
         private const val MAX_SNIPPET_LENGTH = 60
 
         // حد أدنى لحركة الإصبع (بالبكسل) لاعتبارها سحبا لمربع تحديد
@@ -91,6 +100,9 @@ class MyAccessibilityService : AccessibilityService() {
 
     // طبقة التحديد الشفافة التي تظهر فوق كامل الشاشة أثناء رسم المربع
     private var selectionOverlayView: SelectionOverlayView? = null
+
+    // منفذ تنفيذ منفصل لمعالجة نتيجة التقاط الشاشة (takeScreenshot) خارج الخيط الرئيسي
+    private val screenshotExecutor = Executors.newSingleThreadExecutor()
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -309,8 +321,9 @@ class MyAccessibilityService : AccessibilityService() {
 
         val overlay = SelectionOverlayView(
             context = this,
-            onSelectionComplete = { rect -> finishSelectionMode(rect) },
-            onSelectionCancelled = { finishSelectionMode(null) }
+            onCopyText = { rect -> handleCopyText(rect) },
+            onSaveImage = { rect -> handleSaveImage(rect) },
+            onSelectionCancelled = { removeSelectionOverlay() }
         )
 
         val params = WindowManager.LayoutParams(
@@ -336,11 +349,15 @@ class MyAccessibilityService : AccessibilityService() {
         selectionOverlayView = overlay
     }
 
-    private fun finishSelectionMode(selectedRect: Rect?) {
+    private fun removeSelectionOverlay() {
         selectionOverlayView?.let { runCatching { windowManager.removeView(it) } }
         selectionOverlayView = null
+    }
 
-        if (selectedRect == null || selectedRect.width() < DRAG_THRESHOLD_PX || selectedRect.height() < DRAG_THRESHOLD_PX) {
+    private fun handleCopyText(selectedRect: Rect) {
+        removeSelectionOverlay()
+
+        if (selectedRect.width() < DRAG_THRESHOLD_PX || selectedRect.height() < DRAG_THRESHOLD_PX) {
             return
         }
 
@@ -355,6 +372,108 @@ class MyAccessibilityService : AccessibilityService() {
         showCopyNotification(text)
         // تأكيد فوري على الشاشة بأن النسخ نجح، بالإضافة إلى الإشعار.
         Toast.makeText(this, getString(R.string.copied_to_clipboard_toast), Toast.LENGTH_SHORT).show()
+    }
+
+    private fun handleSaveImage(selectedRect: Rect) {
+        removeSelectionOverlay()
+
+        if (selectedRect.width() < DRAG_THRESHOLD_PX || selectedRect.height() < DRAG_THRESHOLD_PX) {
+            return
+        }
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            Toast.makeText(this, getString(R.string.image_not_supported_toast), Toast.LENGTH_LONG).show()
+            return
+        }
+
+        captureScreenshot { fullBitmap ->
+            if (fullBitmap == null) {
+                Toast.makeText(this, getString(R.string.image_save_failed_toast), Toast.LENGTH_SHORT).show()
+                return@captureScreenshot
+            }
+
+            val cropped = runCatching { cropBitmapToRect(fullBitmap, selectedRect) }.getOrNull()
+            fullBitmap.recycle()
+
+            if (cropped == null) {
+                Toast.makeText(this, getString(R.string.image_save_failed_toast), Toast.LENGTH_SHORT).show()
+                return@captureScreenshot
+            }
+
+            val uri = runCatching { saveBitmapToGallery(cropped) }.getOrNull()
+            cropped.recycle()
+
+            if (uri == null) {
+                Toast.makeText(this, getString(R.string.image_save_failed_toast), Toast.LENGTH_SHORT).show()
+                return@captureScreenshot
+            }
+
+            copyImageToClipboard(uri)
+            showImageSavedNotification()
+            Toast.makeText(this, getString(R.string.image_saved_toast), Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** يلتقط لقطة لكامل الشاشة الحالية عبر AccessibilityService.takeScreenshot (يتطلب أندرويد 11+). */
+    @RequiresApi(Build.VERSION_CODES.R)
+    private fun captureScreenshot(onResult: (Bitmap?) -> Unit) {
+        takeScreenshot(
+            Display.DEFAULT_DISPLAY,
+            screenshotExecutor,
+            object : TakeScreenshotCallback {
+                override fun onSuccess(result: ScreenshotResult) {
+                    val bitmap = runCatching {
+                        val hardwareBitmap = Bitmap.wrapHardwareBuffer(result.hardwareBuffer, result.colorSpace)
+                        val softwareBitmap = hardwareBitmap?.copy(Bitmap.Config.ARGB_8888, false)
+                        hardwareBitmap?.recycle()
+                        result.hardwareBuffer.close()
+                        softwareBitmap
+                    }.getOrNull()
+                    mainHandlerPost { onResult(bitmap) }
+                }
+
+                override fun onFailure(errorCode: Int) {
+                    mainHandlerPost { onResult(null) }
+                }
+            }
+        )
+    }
+
+    private fun mainHandlerPost(action: () -> Unit) {
+        android.os.Handler(mainLooper).post(action)
+    }
+
+    private fun cropBitmapToRect(source: Bitmap, target: Rect): Bitmap {
+        val left = target.left.coerceIn(0, source.width)
+        val top = target.top.coerceIn(0, source.height)
+        val right = target.right.coerceIn(left, source.width)
+        val bottom = target.bottom.coerceIn(top, source.height)
+        return Bitmap.createBitmap(source, left, top, right - left, bottom - top)
+    }
+
+    /** يحفظ الصورة في معرض الصور (Pictures/TextGrabber) عبر MediaStore، ويعيد رابط (Uri) الصورة المحفوظة. */
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun saveBitmapToGallery(bitmap: Bitmap): android.net.Uri? {
+        val fileName = "textgrabber_${System.currentTimeMillis()}.png"
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+            put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+            put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/TextGrabber")
+        }
+        val resolver = contentResolver
+        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return null
+        resolver.openOutputStream(uri)?.use { out ->
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+        } ?: return null
+        return uri
+    }
+
+    /** ينسخ رابط الصورة المحفوظة إلى الحافظة حتى يمكن لصقها كصورة في تطبيقات أخرى. */
+    private fun copyImageToClipboard(uri: android.net.Uri) {
+        val clipboardManager =
+            getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
+        val clip = ClipData.newUri(contentResolver, "TextGrabber Image", uri)
+        clipboardManager.setPrimaryClip(clip)
     }
 
     /**
@@ -511,6 +630,35 @@ class MyAccessibilityService : AccessibilityService() {
             fullText
         }
 
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_menu_edit)
+            .setContentTitle(getString(R.string.notification_title))
+            .setContentText(snippet)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(snippet))
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setAutoCancel(true)
+            .setContentIntent(openAppPendingIntent())
+            .build()
+
+        val manager = getSystemService(NotificationManager::class.java)
+        manager?.notify(NOTIFICATION_ID_TEXT, notification)
+    }
+
+    /** إظهار إشعار بسيط يؤكد حفظ الصورة المحددة في المعرض ونسخها إلى الحافظة */
+    private fun showImageSavedNotification() {
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_menu_gallery)
+            .setContentTitle(getString(R.string.image_notification_title))
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setAutoCancel(true)
+            .setContentIntent(openAppPendingIntent())
+            .build()
+
+        val manager = getSystemService(NotificationManager::class.java)
+        manager?.notify(NOTIFICATION_ID_IMAGE, notification)
+    }
+
+    private fun openAppPendingIntent(): PendingIntent {
         val openAppIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
@@ -519,22 +667,7 @@ class MyAccessibilityService : AccessibilityService() {
         } else {
             PendingIntent.FLAG_UPDATE_CURRENT
         }
-        val pendingIntent = PendingIntent.getActivity(
-            this, 0, openAppIntent, pendingIntentFlags
-        )
-
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_menu_edit)
-            .setContentTitle(getString(R.string.notification_title))
-            .setContentText(snippet)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(snippet))
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setAutoCancel(true)
-            .setContentIntent(pendingIntent)
-            .build()
-
-        val manager = getSystemService(NotificationManager::class.java)
-        manager?.notify(NOTIFICATION_ID, notification)
+        return PendingIntent.getActivity(this, 0, openAppIntent, pendingIntentFlags)
     }
 
     private fun dpToPx(dp: Int): Int {
