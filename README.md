@@ -81,7 +81,7 @@
 
 ## روابط المشروع
 - المستودع: https://github.com/almobarakamjd/TextGrabber
-- تحميل آخر APK: https://github.com/almobarakamjd/TextGrabber/releases/tag/v1.2.1
+- تحميل آخر APK: https://github.com/almobarakamjd/TextGrabber/releases/tag/v1.3.0
 
 ## كيفية التشغيل
 راجع قسم "طريقة التشغيل والاختبار" الذي شرحه المساعد في المحادثة (فتح المشروع في Android Studio، مزامنة Gradle، تشغيله على جهاز حقيقي، تفعيل الخدمة من الإعدادات). بديلا عن ذلك، يمكن تحميل ملف APK الجاهز مباشرة من رابط الإصدار أعلاه وتثبيته على أي جهاز (بعد السماح بالتثبيت من مصادر غير معروفة).
