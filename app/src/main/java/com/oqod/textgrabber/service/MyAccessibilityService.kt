@@ -3,6 +3,8 @@ package com.oqod.textgrabber.service
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityService.ScreenshotResult
 import android.accessibilityservice.AccessibilityService.TakeScreenshotCallback
+import android.accessibilityservice.GestureDescription
+import android.graphics.Path
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -38,7 +40,11 @@ import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import com.oqod.textgrabber.MainActivity
 import com.oqod.textgrabber.R
+import com.oqod.textgrabber.capture.CopyMode
+import com.oqod.textgrabber.capture.SelectionAnalyzer
+import com.oqod.textgrabber.capture.TextBlock
 import com.oqod.textgrabber.data.CopiedTextStore
+import com.oqod.textgrabber.ocr.OcrEngine
 import com.oqod.textgrabber.ui.SelectionOverlayView
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -65,6 +71,27 @@ class MyAccessibilityService : AccessibilityService() {
         // دقيقتان بلا أي لمس (غادر المستخدم السياق وتركها معلّقة).
         private const val SELECTION_IDLE_CHECK_MS = 15_000L
         private const val SELECTION_IDLE_TIMEOUT_MS = 120_000L
+
+        // حدود الالتقاط الممتد (تمرير الصفحة تلقائيا لتجاوز حافة الشاشة).
+        private const val MAX_EXTENDED_PAGES = 12
+        private const val SCROLL_GESTURE_DURATION_MS = 300L
+        // مهلة استقرار المحتوى بعد كل تمريرة، وهي أيضا أكبر من الحد الذي
+        // يفرضه النظام على تكرار takeScreenshot (نحو ثانية).
+        private const val SCROLL_SETTLE_DELAY_MS = 1_100L
+        // نسبة التداخل المتعمّد بين كل صفحتين: تضمن ألا يضيع سطر عند الحافة،
+        // وتعطي خوارزمية دمج الصور منطقة مشتركة تتعرف عليها.
+        private const val SCROLL_OVERLAP_RATIO = 0.18f
+
+        // معاملات كشف التداخل بين لقطتين متتاليتين عند دمج الصورة الممتدة.
+        private const val SAMPLE_COLUMNS = 12
+        private const val SAMPLE_ROWS = 6
+        private const val MIN_OVERLAP_PX = 16
+        private const val OVERLAP_STEP_PX = 4
+        private const val OVERLAP_MATCH_THRESHOLD = 400
+
+        // إزالة نافذة من WindowManager لا تنعكس على الشاشة فورا؛ ننتظر
+        // لحظة قبل الالتقاط وإلا ظهر الزر العائم داخل الصورة الملتقطة.
+        private const val WINDOW_REMOVAL_DELAY_MS = 180L
         private const val NOTIFICATION_ID_TEXT = 1001
         private const val NOTIFICATION_ID_IMAGE = 1002
         private const val MAX_SNIPPET_LENGTH = 60
@@ -129,6 +156,9 @@ class MyAccessibilityService : AccessibilityService() {
         }
     }
     private var screenOffReceiverRegistered = false
+
+    /** هل أُخفي الزر العائم مؤقتا لأن التقاطا جاريا الآن؟ */
+    private var floatingButtonHiddenForCapture = false
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -388,8 +418,9 @@ class MyAccessibilityService : AccessibilityService() {
 
         val overlay = SelectionOverlayView(
             context = this,
-            onCopyText = { rect -> handleCopyText(rect) },
-            onSaveImage = { rect -> handleSaveImage(rect) },
+            onAnalyze = { rect -> analyzeSelection(rect) },
+            onCopyText = { rect, mode, extended -> handleCopy(rect, mode, extended) },
+            onSaveImage = { rect, extended -> handleSaveImage(rect, extended) },
             onSelectionCancelled = { removeSelectionOverlay() }
         )
 
@@ -450,15 +481,196 @@ class MyAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun handleCopyText(selectedRect: Rect) {
+    // ---------------------------------------------------------------------
+    // تحليل محتوى المربع واختيار وضع النسخ المناسب
+    // ---------------------------------------------------------------------
+
+    /**
+     * فحص خفيف وسريع لمحتوى المربع، تستدعيه طبقة التحديد بعد كل تعديل
+     * لحدوده ليقرر عنوان زر النسخ. لا يشغّل OCR ولا يلتقط صورة: يكتفي
+     * بحدود عناصر النص في شجرة إمكانية الوصول.
+     */
+    private fun analyzeSelection(selectedRect: Rect): CopyMode {
+        val bounds = collectTextBounds(selectedRect)
+        val bands = SelectionAnalyzer.findImageBands(selectedRect, bounds)
+        return when {
+            bounds.isNotEmpty() && bands.isNotEmpty() -> CopyMode.MIXED
+            bounds.isNotEmpty() -> CopyMode.TEXT
+            else -> CopyMode.IMAGE
+        }
+    }
+
+    /** حدود كل عنصر نصي يقع فعليا داخل المربع (بلا استخراج النص نفسه). */
+    private fun collectTextBounds(target: Rect): List<Rect> {
+        val root = rootInActiveWindow ?: return emptyList()
+        val result = mutableListOf<Rect>()
+        try {
+            collectTextBoundsRecursive(root, target, result)
+        } finally {
+            root.recycle()
+        }
+        return result
+    }
+
+    private fun collectTextBoundsRecursive(
+        node: AccessibilityNodeInfo,
+        target: Rect,
+        result: MutableList<Rect>
+    ) {
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+
+        if (Rect.intersects(bounds, target) && !node.text.isNullOrBlank() &&
+            isMeaningfullyInside(bounds, target)
+        ) {
+            val clipped = Rect(bounds)
+            if (clipped.intersect(target)) result.add(clipped)
+        }
+
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            collectTextBoundsRecursive(child, target, result)
+            child.recycle()
+        }
+    }
+
+    /** كتل النص المقروءة من الواجهة داخل المربع، مع مواضعها على الشاشة. */
+    private fun collectTextBlocks(target: Rect): List<TextBlock> {
+        val root = rootInActiveWindow ?: return emptyList()
+        val result = mutableListOf<TextBlock>()
+        try {
+            collectTextBlocksRecursive(root, target, result)
+        } finally {
+            root.recycle()
+        }
+        return result
+    }
+
+    private fun collectTextBlocksRecursive(
+        node: AccessibilityNodeInfo,
+        target: Rect,
+        result: MutableList<TextBlock>
+    ) {
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+
+        if (Rect.intersects(bounds, target)) {
+            val text = node.text?.toString()
+            if (!text.isNullOrBlank()) {
+                val precise = extractWordsInsideRect(node, text, target)
+                val value = when {
+                    precise != null -> precise.takeIf { it.isNotBlank() }
+                    isMeaningfullyInside(bounds, target) -> text.trim()
+                    else -> null
+                }
+                if (value != null) result.add(TextBlock(value, bounds.top, Rect(bounds)))
+            }
+        }
+
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            collectTextBlocksRecursive(child, target, result)
+            child.recycle()
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // زر النسخ التكيّفي (نص / OCR / مركب) بشقيه العادي والممتد
+    // ---------------------------------------------------------------------
+
+    private fun handleCopy(selectedRect: Rect, mode: CopyMode, extended: Boolean) {
         removeSelectionOverlay()
 
         if (selectedRect.width() < DRAG_THRESHOLD_PX || selectedRect.height() < DRAG_THRESHOLD_PX) {
             return
         }
 
-        val text = extractTextInRect(selectedRect)
-        if (text.isNullOrBlank()) {
+        if (mode != CopyMode.TEXT && Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            Toast.makeText(this, getString(R.string.image_not_supported_toast), Toast.LENGTH_LONG).show()
+            return
+        }
+
+        if (mode != CopyMode.TEXT || extended) {
+            Toast.makeText(this, getString(R.string.ocr_working_toast), Toast.LENGTH_SHORT).show()
+        }
+
+        if (extended) {
+            hideFloatingButtonThen { startExtendedTextCapture(selectedRect, mode) }
+            return
+        }
+
+        if (mode == CopyMode.TEXT) {
+            deliverText(SelectionAnalyzer.merge(collectTextBlocks(selectedRect)))
+            return
+        }
+
+        hideFloatingButtonThen {
+            capturePageBlocks(selectedRect, mode) { blocks ->
+                restoreFloatingButtonAfterCapture()
+                deliverText(SelectionAnalyzer.merge(blocks))
+            }
+        }
+    }
+
+    /**
+     * يجمع كتل نص صفحة واحدة: نص الواجهة (إن طُلب)، إضافة إلى نص مستخرج
+     * بالـOCR من الأشرطة التي لا يغطيها نص — وهي الصور داخل المربع. بهذا
+     * يخرج "النسخ المركب" مرتبا: نص الصورة الأولى، ثم الفقرة التي تحتها،
+     * ثم نص الصورة التالية، وهكذا حسب موضع كل كتلة على الشاشة.
+     */
+    private fun capturePageBlocks(
+        target: Rect,
+        mode: CopyMode,
+        onResult: (List<TextBlock>) -> Unit
+    ) {
+        val uiBlocks = if (mode == CopyMode.IMAGE) emptyList() else collectTextBlocks(target)
+        val bands = if (mode == CopyMode.TEXT) {
+            emptyList()
+        } else {
+            SelectionAnalyzer.findImageBands(target, uiBlocks.map { it.bounds })
+                .ifEmpty { listOf(Rect(target)) }
+        }
+
+        if (bands.isEmpty()) {
+            onResult(uiBlocks)
+            return
+        }
+
+        captureScreenshot { fullBitmap ->
+            if (fullBitmap == null) {
+                onResult(uiBlocks)
+                return@captureScreenshot
+            }
+
+            val crops = bands.mapNotNull { band ->
+                runCatching { cropBitmapToRect(fullBitmap, band) }.getOrNull()?.let { band to it }
+            }
+            fullBitmap.recycle()
+
+            if (crops.isEmpty()) {
+                onResult(uiBlocks)
+                return@captureScreenshot
+            }
+
+            runCatching {
+                screenshotExecutor.execute {
+                    val ocrBlocks = crops.mapNotNull { (band, bitmap) ->
+                        val text = OcrEngine.recognize(this, bitmap)
+                        bitmap.recycle()
+                        text?.let { TextBlock(it, band.top, Rect(band)) }
+                    }
+                    mainHandlerPost { onResult(uiBlocks + ocrBlocks) }
+                }
+            }.onFailure {
+                Log.e(TAG, "تعذّر جدولة مهمة التعرّف على النص", it)
+                crops.forEach { (_, bitmap) -> bitmap.recycle() }
+                onResult(uiBlocks)
+            }
+        }
+    }
+
+    private fun deliverText(text: String) {
+        if (text.isBlank()) {
             Toast.makeText(this, getString(R.string.selection_no_text_found), Toast.LENGTH_SHORT).show()
             return
         }
@@ -466,11 +678,160 @@ class MyAccessibilityService : AccessibilityService() {
         copyToClipboard(text)
         CopiedTextStore.addText(text)
         showCopyNotification(text)
-        // تأكيد فوري على الشاشة بأن النسخ نجح، بالإضافة إلى الإشعار.
         Toast.makeText(this, getString(R.string.copied_to_clipboard_toast), Toast.LENGTH_SHORT).show()
     }
 
-    private fun handleSaveImage(selectedRect: Rect) {
+    // ---------------------------------------------------------------------
+    // الالتقاط الممتد: تمرير الصفحة تلقائيا لتجاوز حافة الشاشة
+    // ---------------------------------------------------------------------
+
+    /** يجمع نص صفحات متتالية بتمرير المحتوى تحت المربع مرة بعد مرة. */
+    private fun startExtendedTextCapture(target: Rect, mode: CopyMode) {
+        val collected = mutableListOf<TextBlock>()
+        var offset = 0
+
+        fun step(page: Int) {
+            capturePageBlocks(target, mode) { blocks ->
+                // نزيح المواضع بمقدار ما مُرّر حتى الآن، فتبقى الكتل مرتبة
+                // ترتيبا صحيحا عبر الصفحات لا داخل الصفحة الواحدة فقط.
+                val shift = offset
+                collected += blocks.map { TextBlock(it.text, it.top + shift, it.bounds) }
+
+                if (page + 1 >= MAX_EXTENDED_PAGES) {
+                    finishExtendedText(collected)
+                    return@capturePageBlocks
+                }
+
+                val distance = scrollDistanceFor(target)
+                scrollSelection(target) { scrolled ->
+                    if (!scrolled) {
+                        finishExtendedText(collected)
+                    } else {
+                        offset += distance
+                        mainHandler.postDelayed({ step(page + 1) }, SCROLL_SETTLE_DELAY_MS)
+                    }
+                }
+            }
+        }
+
+        step(0)
+    }
+
+    private fun finishExtendedText(blocks: List<TextBlock>) {
+        restoreFloatingButtonAfterCapture()
+        deliverText(SelectionAnalyzer.merge(blocks))
+    }
+
+    private fun scrollDistanceFor(target: Rect): Int {
+        val overlap = (target.height() * SCROLL_OVERLAP_RATIO).toInt()
+        return (target.height() - overlap).coerceAtLeast(1)
+    }
+
+    /**
+     * يمرّر محتوى المربع بمقدار ارتفاعه ناقصا نسبة تداخل، عبر إيماءة سحب
+     * حقيقية (dispatchGesture) لأنها الطريقة الوحيدة التي تتيح **التحكم في
+     * مسافة التمرير**؛ أما ACTION_SCROLL_FORWARD فيمرّر بمقدار لا نعرفه،
+     * فقد يضيع ما بين الحافتين ويستحيل دمج الصور. نستخدمه احتياطيا فقط إن
+     * فشلت الإيماءة (بعض التطبيقات تمنعها).
+     */
+    private fun scrollSelection(target: Rect, onDone: (Boolean) -> Unit) {
+        val distance = scrollDistanceFor(target)
+        val centerX = target.centerX().toFloat()
+        val startY = target.bottom - target.height() * 0.08f
+        val endY = (startY - distance).coerceAtLeast(1f)
+
+        val path = Path().apply {
+            moveTo(centerX, startY)
+            lineTo(centerX, endY)
+        }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, SCROLL_GESTURE_DURATION_MS))
+            .build()
+
+        val dispatched = runCatching {
+            dispatchGesture(
+                gesture,
+                object : GestureResultCallback() {
+                    override fun onCompleted(gestureDescription: GestureDescription?) {
+                        mainHandlerPost { onDone(true) }
+                    }
+
+                    override fun onCancelled(gestureDescription: GestureDescription?) {
+                        mainHandlerPost { onDone(scrollWithAccessibilityAction(target)) }
+                    }
+                },
+                mainHandler
+            )
+        }.getOrDefault(false)
+
+        if (!dispatched) onDone(scrollWithAccessibilityAction(target))
+    }
+
+    /** احتياطي: تمرير عبر ACTION_SCROLL_FORWARD على أقرب عنصر قابل للتمرير. */
+    private fun scrollWithAccessibilityAction(target: Rect): Boolean {
+        val root = rootInActiveWindow ?: return false
+        return try {
+            val node = findScrollableNode(root, target) ?: return false
+            val performed = node.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+            if (node !== root) node.recycle()
+            performed
+        } finally {
+            root.recycle()
+        }
+    }
+
+    private fun findScrollableNode(node: AccessibilityNodeInfo, target: Rect): AccessibilityNodeInfo? {
+        // نفضّل الأعمق: عنصر التمرير الداخلي أدق من تمرير الشاشة كلها.
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            val found = findScrollableNode(child, target)
+            if (found != null) {
+                if (found !== child) child.recycle()
+                return found
+            }
+            child.recycle()
+        }
+
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+        return if (node.isScrollable && Rect.intersects(bounds, target)) node else null
+    }
+
+    /**
+     * الزر العائم يظهر فوق كل شيء، فلو بقي ظاهرا لدخل داخل اللقطة وأفسد
+     * الصورة أو نتيجة التعرّف. نخفيه أثناء الالتقاط ونعيده بعده.
+     */
+    private fun hideFloatingButtonForCapture() {
+        if (floatingButtonView == null) return
+        floatingButtonHiddenForCapture = true
+        removeFloatingButton()
+    }
+
+    /**
+     * يخفي الزر العائم ثم ينفّذ [action] بعد لحظة قصيرة، حتى يكون النظام قد
+     * أزال النافذة فعليا من الشاشة قبل التقاط اللقطة.
+     */
+    private fun hideFloatingButtonThen(action: () -> Unit) {
+        val wasVisible = floatingButtonView != null
+        hideFloatingButtonForCapture()
+        if (wasVisible) {
+            mainHandler.postDelayed(action, WINDOW_REMOVAL_DELAY_MS)
+        } else {
+            action()
+        }
+    }
+
+    private fun restoreFloatingButtonAfterCapture() {
+        if (!floatingButtonHiddenForCapture) return
+        floatingButtonHiddenForCapture = false
+        if (isFloatingButtonEnabled(this)) addFloatingButton()
+    }
+
+    // ---------------------------------------------------------------------
+    // زر الصورة (لقطة للمربع، وممتدة عبر التمرير عند تفعيل "ممتد")
+    // ---------------------------------------------------------------------
+
+    private fun handleSaveImage(selectedRect: Rect, extended: Boolean) {
         removeSelectionOverlay()
 
         if (selectedRect.width() < DRAG_THRESHOLD_PX || selectedRect.height() < DRAG_THRESHOLD_PX) {
@@ -482,32 +843,208 @@ class MyAccessibilityService : AccessibilityService() {
             return
         }
 
+        if (extended) {
+            Toast.makeText(this, getString(R.string.extended_working_toast), Toast.LENGTH_SHORT).show()
+            hideFloatingButtonThen { startExtendedImageCapture(selectedRect) }
+            return
+        }
+
+        hideFloatingButtonThen {
+            captureCrop(selectedRect) { cropped ->
+                restoreFloatingButtonAfterCapture()
+                if (cropped == null) {
+                    Toast.makeText(this, getString(R.string.image_save_failed_toast), Toast.LENGTH_SHORT).show()
+                } else {
+                    saveAndDeliverImage(cropped)
+                }
+            }
+        }
+    }
+
+    /** يلتقط الشاشة ويقصّها على المربع المطلوب، ويعيد الصورة أو null. */
+    private fun captureCrop(target: Rect, onResult: (Bitmap?) -> Unit) {
         captureScreenshot { fullBitmap ->
             if (fullBitmap == null) {
-                Toast.makeText(this, getString(R.string.image_save_failed_toast), Toast.LENGTH_SHORT).show()
+                onResult(null)
                 return@captureScreenshot
             }
-
-            val cropped = runCatching { cropBitmapToRect(fullBitmap, selectedRect) }.getOrNull()
+            val cropped = runCatching { cropBitmapToRect(fullBitmap, target) }.getOrNull()
             fullBitmap.recycle()
-
-            if (cropped == null) {
-                Toast.makeText(this, getString(R.string.image_save_failed_toast), Toast.LENGTH_SHORT).show()
-                return@captureScreenshot
-            }
-
-            val uri = runCatching { saveBitmapToGallery(cropped) }.getOrNull()
-            cropped.recycle()
-
-            if (uri == null) {
-                Toast.makeText(this, getString(R.string.image_save_failed_toast), Toast.LENGTH_SHORT).show()
-                return@captureScreenshot
-            }
-
-            copyImageToClipboard(uri)
-            showImageSavedNotification()
-            Toast.makeText(this, getString(R.string.image_saved_toast), Toast.LENGTH_SHORT).show()
+            onResult(cropped)
         }
+    }
+
+    /**
+     * صورة ممتدة: يلتقط المربع، يمرّر، يلتقط مجددا، ثم يدمج اللقطات عموديا
+     * بعد كشف منطقة التداخل بينها، فتخرج صورة واحدة طويلة للصفحة كاملة.
+     */
+    private fun startExtendedImageCapture(target: Rect) {
+        val pages = mutableListOf<Bitmap>()
+
+        fun finish() {
+            restoreFloatingButtonAfterCapture()
+            if (pages.isEmpty()) {
+                Toast.makeText(this, getString(R.string.image_save_failed_toast), Toast.LENGTH_SHORT).show()
+                return
+            }
+
+            val snapshot = pages.toList()
+            val scheduled = runCatching {
+                screenshotExecutor.execute {
+                    val stitched = runCatching { stitchVertically(snapshot) }.getOrNull()
+                    snapshot.forEach { it.recycle() }
+                    val uri = stitched?.let { bitmap ->
+                        runCatching { saveBitmapToGallery(bitmap) }.getOrNull().also { bitmap.recycle() }
+                    }
+                    mainHandlerPost { onImageSaved(uri) }
+                }
+            }
+            if (scheduled.isFailure) {
+                Log.e(TAG, "تعذّر جدولة دمج الصورة الممتدة", scheduled.exceptionOrNull())
+                snapshot.forEach { it.recycle() }
+                Toast.makeText(this, getString(R.string.image_save_failed_toast), Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        fun step(page: Int) {
+            captureCrop(target) { cropped ->
+                if (cropped != null) pages.add(cropped)
+
+                if (cropped == null || page + 1 >= MAX_EXTENDED_PAGES) {
+                    finish()
+                    return@captureCrop
+                }
+
+                scrollSelection(target) { scrolled ->
+                    if (!scrolled) {
+                        finish()
+                    } else {
+                        mainHandler.postDelayed({ step(page + 1) }, SCROLL_SETTLE_DELAY_MS)
+                    }
+                }
+            }
+        }
+
+        step(0)
+    }
+
+    private fun saveAndDeliverImage(bitmap: Bitmap) {
+        val scheduled = runCatching {
+            screenshotExecutor.execute {
+                val uri = runCatching { saveBitmapToGallery(bitmap) }.getOrNull()
+                bitmap.recycle()
+                mainHandlerPost { onImageSaved(uri) }
+            }
+        }
+        if (scheduled.isFailure) {
+            Log.e(TAG, "تعذّر جدولة حفظ الصورة", scheduled.exceptionOrNull())
+            bitmap.recycle()
+            Toast.makeText(this, getString(R.string.image_save_failed_toast), Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun onImageSaved(uri: android.net.Uri?) {
+        if (uri == null) {
+            Toast.makeText(this, getString(R.string.image_save_failed_toast), Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        copyImageToClipboard(uri)
+        showImageSavedNotification()
+        Toast.makeText(this, getString(R.string.image_saved_toast), Toast.LENGTH_SHORT).show()
+    }
+
+    /**
+     * يدمج لقطات متتابعة في صورة واحدة. لا نعتمد على مسافة التمرير المطلوبة
+     * لأن التطبيقات تتفاوت (قصور ذاتي، التصاق بالعناصر)، بل نكتشف التداخل
+     * الفعلي بمقارنة الصفوف الأخيرة من الصورة السابقة بصفوف الصورة التالية.
+     */
+    private fun stitchVertically(pages: List<Bitmap>): Bitmap {
+        if (pages.size == 1) return pages[0].copy(Bitmap.Config.ARGB_8888, false)
+
+        val width = pages.minOf { it.width }
+
+        // التداخل بين كل صفحة وسابقتها، يُحسب مرة واحدة فقط لأنه أثقل جزء.
+        val overlaps = IntArray(pages.size)
+        var totalHeight = pages[0].height
+        for (i in 1 until pages.size) {
+            val overlap = detectOverlap(pages[i - 1], pages[i], width)
+                .coerceIn(0, pages[i].height)
+            overlaps[i] = overlap
+            totalHeight += pages[i].height - overlap
+        }
+
+        if (totalHeight <= 0) return pages[0].copy(Bitmap.Config.ARGB_8888, false)
+
+        val result = Bitmap.createBitmap(width, totalHeight, Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(result)
+        var y = 0
+        for (i in pages.indices) {
+            val page = pages[i]
+            val srcTop = overlaps[i]
+            val sliceHeight = page.height - srcTop
+            if (sliceHeight <= 0) continue
+            canvas.drawBitmap(
+                page,
+                Rect(0, srcTop, width, page.height),
+                Rect(0, y, width, y + sliceHeight),
+                null
+            )
+            y += sliceHeight
+        }
+
+        return result
+    }
+
+    /**
+     * يعيد عدد الصفوف التي تتكرر في أعلى [next] وقد ظهرت أصلا في أسفل
+     * [previous]. يقارن عيّنة من الأعمدة فقط حتى تبقى العملية سريعة.
+     */
+    private fun detectOverlap(previous: Bitmap, next: Bitmap, width: Int): Int {
+        val maxOverlap = minOf(previous.height, next.height)
+        if (maxOverlap <= 0 || width <= 0) return 0
+
+        val sampleColumns = IntArray(SAMPLE_COLUMNS) { i ->
+            ((i + 0.5f) / SAMPLE_COLUMNS * width).toInt().coerceIn(0, width - 1)
+        }
+
+        var bestOverlap = 0
+        var bestScore = Int.MAX_VALUE
+
+        var overlap = maxOverlap
+        while (overlap > MIN_OVERLAP_PX) {
+            var score = 0
+            var rows = 0
+            var row = 0
+            while (row < overlap && rows < SAMPLE_ROWS) {
+                val prevY = previous.height - overlap + row
+                if (prevY < 0) break
+                for (x in sampleColumns) {
+                    val a = previous.getPixel(x, prevY)
+                    val b = next.getPixel(x, row)
+                    score += pixelDistance(a, b)
+                }
+                rows++
+                row += (overlap / SAMPLE_ROWS).coerceAtLeast(1)
+            }
+            if (rows > 0) {
+                val normalized = score / rows
+                if (normalized < bestScore) {
+                    bestScore = normalized
+                    bestOverlap = overlap
+                }
+            }
+            overlap -= OVERLAP_STEP_PX
+        }
+
+        return if (bestScore <= OVERLAP_MATCH_THRESHOLD) bestOverlap else 0
+    }
+
+    private fun pixelDistance(a: Int, b: Int): Int {
+        val dr = abs(((a shr 16) and 0xFF) - ((b shr 16) and 0xFF))
+        val dg = abs(((a shr 8) and 0xFF) - ((b shr 8) and 0xFF))
+        val db = abs((a and 0xFF) - (b and 0xFF))
+        return dr + dg + db
     }
 
     /** يلتقط لقطة لكامل الشاشة الحالية عبر AccessibilityService.takeScreenshot (يتطلب أندرويد 11+). */

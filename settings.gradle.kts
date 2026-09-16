@@ -17,6 +17,9 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // مصدر مكتبة Tesseract4Android (التعرّف الضوئي على النص) — غير متاحة
+        // على Maven Central، يوزّعها المطوّر عبر JitPack فقط.
+        maven { url = uri("https://jitpack.io") }
     }
 }
 

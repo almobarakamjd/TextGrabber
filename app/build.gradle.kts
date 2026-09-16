@@ -13,8 +13,14 @@ android {
         applicationId = "com.oqod.textgrabber"
         minSdk = 26
         targetSdk = 36
-        versionCode = 8
-        versionName = "1.3.1"
+        versionCode = 9
+        versionName = "1.4.0"
+
+        // مكتبة Tesseract أصلية (native)؛ نقتصر على معماريتي الهواتف الحقيقية
+        // ونستبعد x86/x86_64 الخاصة بالمحاكيات، فيصغر حجم APK نحو 8 ميجابايت.
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
     }
 
     signingConfigs {
@@ -34,6 +40,12 @@ android {
             )
             signingConfig = signingConfigs.getByName("debug")
         }
+    }
+
+    androidResources {
+        // ملفات لغة Tesseract يجب أن تبقى غير مضغوطة داخل APK، وإلا فشلت
+        // قراءتها عبر AssetManager.openFd عند نسخها إلى مجلد التطبيق.
+        noCompress += "traineddata"
     }
 
     compileOptions {
@@ -63,6 +75,9 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     implementation(libs.androidx.material.icons.extended)
+
+    // التعرّف الضوئي على النص (OCR) على الجهاز بالكامل، بلا أي اتصال بالإنترنت
+    implementation(libs.tesseract4android)
 
     debugImplementation(libs.androidx.ui.tooling)
     testImplementation(libs.junit)

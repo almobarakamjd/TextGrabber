@@ -9,6 +9,7 @@ import android.graphics.RectF
 import android.util.TypedValue
 import android.view.MotionEvent
 import android.view.View
+import com.oqod.textgrabber.capture.CopyMode
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -19,10 +20,15 @@ import kotlin.math.min
  * يرسم المستخدم بإصبعه مربعا فوق المحتوى الذي يريده. عند رفع الإصبع لا
  * يتم تنفيذ أي إجراء فورا؛ بل يبقى المربع ظاهرا في "وضع التأكيد" بحدود
  * قابلة للتحكم (مقابض في الزوايا والمنتصف لتغيير الحجم، والسحب من داخله
- * لتحريكه كاملا)، ويظهر أسفله زرّان صغيران: "نسخ" (لاستخراج النص داخل
- * المربع) و"صورة" (لحفظ محتوى المربع كصورة). الضغط على أحد الزرين يستدعي
- * [onCopyText] أو [onSaveImage] بإحداثيات المربع النهائي **على الشاشة**.
- * الضغط خارج المربع وخارج الزرّين يبدأ تحديدا جديدا من الصفر، والنقر
+ * لتحريكه كاملا)، ويظهر أسفله شريط أدوات صغير.
+ *
+ * شريط الأدوات **تكيّفي**: يُستدعى [onAnalyze] فور تثبيت المربع (وبعد كل
+ * تعديل لحدوده) ليفحص محتواه، فيتغيّر عنوان زر النسخ تلقائيا بين "نسخ"
+ * (نص واجهة صرف) و"نسخ OCR" (صورة فقط) و"نسخ مركب" (نص وصور معا)، بجانب
+ * زر "صورة" الثابت. ويوجد مفتاح "ممتد" يجعل العملية تمرّر الصفحة تلقائيا
+ * لتشمل ما يمتد تحت حافة الشاشة بدل الاكتفاء بالمعروض.
+ *
+ * الضغط خارج المربع وخارج شريط الأدوات يبدأ تحديدا جديدا من الصفر، والنقر
  * البسيط دون سحب يُعتبر إلغاء ويستدعي [onSelectionCancelled].
  *
  * ملاحظة دقة: نستخدم إحداثيات اللمس المحلية (event.x / event.y) للرسم حتى
@@ -32,8 +38,9 @@ import kotlin.math.min
  */
 class SelectionOverlayView(
     context: Context,
-    private val onCopyText: (Rect) -> Unit,
-    private val onSaveImage: (Rect) -> Unit,
+    private val onAnalyze: (Rect) -> CopyMode,
+    private val onCopyText: (Rect, CopyMode, Boolean) -> Unit,
+    private val onSaveImage: (Rect, Boolean) -> Unit,
     private val onSelectionCancelled: () -> Unit
 ) : View(context) {
 
@@ -43,7 +50,7 @@ class SelectionOverlayView(
         NONE, MOVE, TOP_LEFT, TOP_RIGHT, BOTTOM_LEFT, BOTTOM_RIGHT, TOP, BOTTOM, LEFT, RIGHT
     }
 
-    private enum class PendingButton { NONE, COPY, IMAGE }
+    private enum class PendingButton { NONE, COPY, IMAGE, EXTENDED }
 
     private val backgroundPaint = Paint().apply {
         color = Color.parseColor("#40000000")
@@ -85,6 +92,18 @@ class SelectionOverlayView(
         style = Paint.Style.FILL
     }
 
+    // مفتاح "ممتد" في حالته المطفأة: رمادي داكن شبه شفاف ليتميّز عن أزرار العمل.
+    private val chipOffPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#B3424242")
+        style = Paint.Style.FILL
+    }
+
+    // وفي حالته المفعّلة: أخضر واضح.
+    private val chipOnPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#2E7D32")
+        style = Paint.Style.FILL
+    }
+
     private val buttonTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         textAlign = Paint.Align.CENTER
@@ -112,13 +131,22 @@ class SelectionOverlayView(
     private val handleVisualRadiusPx = dpToPx(7f).toFloat()
     private val cornerRadiusPx = dpToPx(8f).toFloat()
 
-    private val buttonWidthPx = dpToPx(84f)
+    private val copyButtonWidthPx = dpToPx(104f)
+    private val imageButtonWidthPx = dpToPx(72f)
+    private val extendedChipWidthPx = dpToPx(72f)
     private val buttonHeightPx = dpToPx(44f)
-    private val buttonGapPx = dpToPx(12f)
+    private val buttonGapPx = dpToPx(8f)
     private val buttonMarginPx = dpToPx(16f)
 
     private val copyButtonRect = RectF()
     private val imageButtonRect = RectF()
+    private val extendedChipRect = RectF()
+
+    /** نوع النسخ المناسب لمحتوى المربع الحالي، يحدده [onAnalyze]. */
+    private var copyMode = CopyMode.TEXT
+
+    /** هل يشمل الالتقاط ما يمتد تحت حافة الشاشة (بتمرير الصفحة تلقائيا)؟ */
+    private var extendedCapture = false
 
     private val locationOnScreen = IntArray(2)
 
@@ -153,8 +181,14 @@ class SelectionOverlayView(
         drawHandles(canvas)
 
         layoutButtons()
-        drawButton(canvas, copyButtonRect, COPY_LABEL)
-        drawButton(canvas, imageButtonRect, IMAGE_LABEL)
+        drawButton(canvas, copyButtonRect, copyLabel(), buttonPaint)
+        drawButton(canvas, imageButtonRect, IMAGE_LABEL, buttonPaint)
+        drawButton(
+            canvas,
+            extendedChipRect,
+            if (extendedCapture) EXTENDED_ON_LABEL else EXTENDED_OFF_LABEL,
+            if (extendedCapture) chipOnPaint else chipOffPaint
+        )
     }
 
     private fun drawHandles(canvas: Canvas) {
@@ -174,25 +208,48 @@ class SelectionOverlayView(
         }
     }
 
-    private fun drawButton(canvas: Canvas, rect: RectF, label: String) {
-        canvas.drawRoundRect(rect, cornerRadiusPx, cornerRadiusPx, buttonPaint)
+    private fun copyLabel(): String = when (copyMode) {
+        CopyMode.TEXT -> COPY_LABEL
+        CopyMode.IMAGE -> COPY_OCR_LABEL
+        CopyMode.MIXED -> COPY_MIXED_LABEL
+    }
+
+    private fun drawButton(canvas: Canvas, rect: RectF, label: String, paint: Paint) {
+        canvas.drawRoundRect(rect, cornerRadiusPx, cornerRadiusPx, paint)
         val textY = rect.centerY() - (buttonTextPaint.ascent() + buttonTextPaint.descent()) / 2
         canvas.drawText(label, rect.centerX(), textY, buttonTextPaint)
     }
 
-    /** يضع زري "نسخ" و"صورة" جنبا إلى جنب أسفل المربع، أو أعلاه إن لم تتسع المساحة أسفله. */
+    /**
+     * يضع شريط الأدوات (زر النسخ التكيّفي + زر الصورة + مفتاح "ممتد") أسفل
+     * المربع، أو أعلاه إن لم تتسع المساحة أسفله.
+     */
     private fun layoutButtons() {
-        val groupWidth = buttonWidthPx * 2 + buttonGapPx
+        val groupWidth = copyButtonWidthPx + imageButtonWidthPx + extendedChipWidthPx +
+            buttonGapPx * 2
         var top = confirmedRect.bottom + buttonMarginPx
         if (top + buttonHeightPx > height) {
             top = confirmedRect.top - buttonMarginPx - buttonHeightPx
         }
-        val groupLeft = (confirmedRect.centerX() - groupWidth / 2f)
-            .coerceIn(0f, width - groupWidth.toFloat())
+        // على الشاشات الضيقة قد تتجاوز مجموعة الأزرار عرض الشاشة؛ نحصر
+        // الطرف الأيسر في المجال الصالح بدل أن يخرج زر خارج الحافة.
+        val maxLeft = (width - groupWidth).coerceAtLeast(0).toFloat()
+        val groupLeft = (confirmedRect.centerX() - groupWidth / 2f).coerceIn(0f, maxLeft)
 
-        copyButtonRect.set(groupLeft, top, groupLeft + buttonWidthPx, top + buttonHeightPx)
+        copyButtonRect.set(groupLeft, top, groupLeft + copyButtonWidthPx, top + buttonHeightPx)
         val imageLeft = copyButtonRect.right + buttonGapPx
-        imageButtonRect.set(imageLeft, top, imageLeft + buttonWidthPx, top + buttonHeightPx)
+        imageButtonRect.set(imageLeft, top, imageLeft + imageButtonWidthPx, top + buttonHeightPx)
+        val chipLeft = imageButtonRect.right + buttonGapPx
+        extendedChipRect.set(
+            chipLeft, top, chipLeft + extendedChipWidthPx, top + buttonHeightPx
+        )
+    }
+
+    /** يعيد فحص محتوى المربع ليحدّث عنوان زر النسخ بعد كل تغيير لحدوده. */
+    private fun refreshCopyMode() {
+        if (mode != Mode.CONFIRMING) return
+        copyMode = runCatching { onAnalyze(toScreenRect(confirmedRect)) }
+            .getOrDefault(CopyMode.TEXT)
     }
 
     /**
@@ -219,6 +276,8 @@ class SelectionOverlayView(
             when {
                 copyButtonRect.contains(event.x, event.y) -> pendingButton = PendingButton.COPY
                 imageButtonRect.contains(event.x, event.y) -> pendingButton = PendingButton.IMAGE
+                extendedChipRect.contains(event.x, event.y) ->
+                    pendingButton = PendingButton.EXTENDED
                 else -> {
                     pendingButton = PendingButton.NONE
                     val handle = findHandleAt(event.x, event.y)
@@ -280,10 +339,20 @@ class SelectionOverlayView(
             if (activeHandle == Handle.NONE) {
                 when {
                     pendingButton == PendingButton.COPY && copyButtonRect.contains(event.x, event.y) ->
-                        dispatch(onCopyText)
+                        onCopyText(toScreenRect(confirmedRect), copyMode, extendedCapture)
                     pendingButton == PendingButton.IMAGE && imageButtonRect.contains(event.x, event.y) ->
-                        dispatch(onSaveImage)
+                        onSaveImage(toScreenRect(confirmedRect), extendedCapture)
+                    pendingButton == PendingButton.EXTENDED &&
+                        extendedChipRect.contains(event.x, event.y) -> {
+                        extendedCapture = !extendedCapture
+                        invalidate()
+                    }
                 }
+            }
+            if (activeHandle != Handle.NONE) {
+                // تغيّرت حدود المربع، فقد يتغيّر نوع محتواه ومعه عنوان زر النسخ.
+                refreshCopyMode()
+                invalidate()
             }
             activeHandle = Handle.NONE
             pendingButton = PendingButton.NONE
@@ -304,6 +373,7 @@ class SelectionOverlayView(
 
         confirmedRect.set(localLeft, localTop, localRight, localBottom)
         mode = Mode.CONFIRMING
+        refreshCopyMode()
         invalidate()
         return true
     }
@@ -318,15 +388,15 @@ class SelectionOverlayView(
         return true
     }
 
-    private fun dispatch(callback: (Rect) -> Unit) {
+    /** يحوّل مستطيلا بإحداثيات الطبقة المحلية إلى إحداثيات الشاشة الفعلية. */
+    private fun toScreenRect(local: RectF): Rect {
         getLocationOnScreen(locationOnScreen)
-        val screenRect = Rect(
-            (confirmedRect.left + locationOnScreen[0]).toInt(),
-            (confirmedRect.top + locationOnScreen[1]).toInt(),
-            (confirmedRect.right + locationOnScreen[0]).toInt(),
-            (confirmedRect.bottom + locationOnScreen[1]).toInt()
+        return Rect(
+            (local.left + locationOnScreen[0]).toInt(),
+            (local.top + locationOnScreen[1]).toInt(),
+            (local.right + locationOnScreen[0]).toInt(),
+            (local.bottom + locationOnScreen[1]).toInt()
         )
-        callback(screenRect)
     }
 
     private fun findHandleAt(x: Float, y: Float): Handle {
@@ -406,6 +476,12 @@ class SelectionOverlayView(
     companion object {
         private const val MIN_SELECTION_SIZE_PX = 12
         private const val COPY_LABEL = "نسخ"
+        private const val COPY_OCR_LABEL = "نسخ OCR"
+        private const val COPY_MIXED_LABEL = "نسخ مركب"
         private const val IMAGE_LABEL = "صورة"
+
+        // مفتاح الالتقاط الممتد: يمرّر الصفحة تلقائيا ليشمل ما تحت حافة الشاشة
+        private const val EXTENDED_OFF_LABEL = "⤓ ممتد"
+        private const val EXTENDED_ON_LABEL = "✓ ممتد"
     }
 }
