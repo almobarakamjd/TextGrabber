@@ -39,6 +39,18 @@
     <string name="floating_button_hidden_hint">تم إخفاء الزر العائم. يمكنك إعادة إظهاره من التطبيق أو من بلاطة الإعدادات السريعة</string>
     <string name="qs_tile_label">زر TextGrabber العائم</string>
     <string name="floating_button_toggle_title">إظهار الزر العائم</string>
+    <!-- نموذج العربية الدقيق للتعرّف الضوئي (تنزيل اختياري) -->
+    <string name="ocr_model_title">دقة قراءة النص العربي من الصور</string>
+    <string name="ocr_model_not_installed_desc">يستخدم التطبيق حاليا نموذجا سريعا صغير الحجم. النموذج الدقيق يقرأ الحروف العربية بدقة أعلى بوضوح (مثل التاء المربوطة والكلمات المتصلة)، لكنه أكبر حجما وأبطأ قليلا في المعالجة. يُنزَّل مرة واحدة من مستودع Tesseract الرسمي، ولا يُرسَل أي شيء من جهازك.</string>
+    <string name="ocr_model_download">تنزيل النموذج الدقيق (%1$s ميجابايت)</string>
+    <string name="ocr_model_downloading">جارٍ التنزيل… %1$d%%</string>
+    <string name="ocr_model_installed_desc">✓ النموذج الدقيق مفعّل، ويُستخدم تلقائيا في النسخ بالـOCR والنسخ المركب.</string>
+    <string name="ocr_model_delete">حذف النموذج الدقيق والعودة للسريع (توفير %1$s ميجابايت)</string>
+    <string name="ocr_model_failed_network">تعذّر التنزيل. تحقق من اتصالك بالإنترنت ثم أعد المحاولة.</string>
+    <string name="ocr_model_failed_verification">وصل الملف تالفا أو غير مطابق للنسخة الموثوقة، فلم يُستخدم. أعد المحاولة.</string>
+    <string name="ocr_model_failed_storage">تعذّر حفظ النموذج على الجهاز. تحقق من المساحة المتاحة ثم أعد المحاولة.</string>
+    <string name="ocr_model_retry">إعادة المحاولة</string>
+
     <string name="floating_button_toggle_desc">اسحب الزر إلى علامة × أسفل الشاشة لإخفائه، أو أعد إظهاره من هنا أو من بلاطة الإعدادات السريعة</string>
 
     <string name="explanation_title">لماذا نطلب صلاحية إمكانية الوصول؟</string>

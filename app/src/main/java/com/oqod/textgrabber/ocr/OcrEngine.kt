@@ -24,6 +24,9 @@ import java.io.File
  * (tessdata_fast)، وتُنسخ عند أول استخدام إلى مجلد التطبيق الخاص
  * (`filesDir/tessdata`) لأن Tesseract يحتاج مسارا حقيقيا على القرص ولا
  * يستطيع القراءة من داخل ملف APK مباشرة.
+ *
+ * وإن نزّل المستخدم نموذج العربية الدقيق من الشاشة الرئيسية (انظر
+ * [OcrModelManager]) يُستخدم تلقائيا بدل السريع، بلا إعادة تشغيل.
  */
 object OcrEngine {
 
@@ -72,22 +75,25 @@ object OcrEngine {
      * عند الفشل. **يجب استدعاؤها من خيط خلفي** — العملية قد تستغرق ثوانيَ.
      */
     fun recognize(context: Context, bitmap: Bitmap): String? {
-        val dataPath = runCatching { prepareDataPath(context) }.getOrElse {
+        val fastDataPath = runCatching { prepareFastDataPath(context) }.getOrElse {
             Log.e(TAG, "تعذّر تجهيز ملفات لغة Tesseract", it)
             return null
         }
+        val bestDataPath = OcrModelManager.bestDataPath(context).absolutePath
+            .takeIf { OcrModelManager.isInstalled(context) }
 
         val prepared = runCatching { preprocess(bitmap) }.getOrElse {
             Log.e(TAG, "تعذّرت معالجة الصورة قبل التعرّف", it)
             return null
         }
 
-        val tess = TessBaseAPI()
+        val tess = createInitializedApi(bestDataPath, fastDataPath)
+        if (tess == null) {
+            if (prepared !== bitmap) prepared.recycle()
+            return null
+        }
+
         return try {
-            if (!tess.init(dataPath, LANGUAGES)) {
-                Log.e(TAG, "فشل تهيئة Tesseract بالمسار $dataPath")
-                return null
-            }
             // الصورة مقصوصة أصلا على مربع اختاره المستخدم، فهي كتلة نص واحدة
             // وليست صفحة كاملة؛ هذا الوضع أدق لها من التحليل التلقائي للصفحة.
             tess.pageSegMode = TessBaseAPI.PageSegMode.PSM_SINGLE_BLOCK
@@ -111,6 +117,31 @@ object OcrEngine {
             runCatching { tess.recycle() }
             if (prepared !== bitmap) prepared.recycle()
         }
+    }
+
+    /**
+     * يهيّئ المحرّك بالنموذج الدقيق إن كان منزَّلا، وإلا بالسريع المضمّن.
+     * وإن فشلت تهيئة الدقيق لأي سبب (ملف تالف بعد التنزيل مثلا) نعود إلى
+     * السريع بدل أن يتعطّل التعرّف كليا.
+     *
+     * كل محاولة بكائن جديد: توثيق المكتبة يوجب `recycle()` بعد فشل `init`،
+     * فإعادة المحاولة على نفس الكائن غير مضمونة السلامة.
+     */
+    private fun createInitializedApi(bestDataPath: String?, fastDataPath: String): TessBaseAPI? {
+        if (bestDataPath != null) {
+            tryInit(bestDataPath)?.let { return it }
+            Log.w(TAG, "فشلت تهيئة النموذج الدقيق، العودة إلى السريع")
+        }
+        return tryInit(fastDataPath).also {
+            if (it == null) Log.e(TAG, "فشل تهيئة Tesseract بالمسار $fastDataPath")
+        }
+    }
+
+    private fun tryInit(dataPath: String): TessBaseAPI? {
+        val api = TessBaseAPI()
+        if (runCatching { api.init(dataPath, LANGUAGES) }.getOrDefault(false)) return api
+        runCatching { api.recycle() }
+        return null
     }
 
     /**
@@ -234,7 +265,7 @@ object OcrEngine {
      * ينسخ ملفات اللغة من `assets` إلى مجلد التطبيق الخاص عند أول استخدام،
      * ويعيد المسار الأب الذي يتوقعه Tesseract (المجلد الذي يحوي `tessdata`).
      */
-    private fun prepareDataPath(context: Context): String {
+    private fun prepareFastDataPath(context: Context): String {
         preparedDataPath?.let { return it }
 
         synchronized(this) {

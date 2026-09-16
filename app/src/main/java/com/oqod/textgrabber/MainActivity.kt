@@ -21,6 +21,8 @@ import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -36,6 +38,7 @@ import android.widget.Toast
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -51,6 +54,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.oqod.textgrabber.data.CopiedTextEntry
 import com.oqod.textgrabber.data.CopiedTextStore
+import com.oqod.textgrabber.ocr.OcrModelManager
 import com.oqod.textgrabber.service.MyAccessibilityService
 import com.oqod.textgrabber.ui.theme.TextGrabberTheme
 import com.oqod.textgrabber.update.LatestRelease
@@ -150,6 +154,8 @@ fun TextGrabberApp() {
             if (isAccessibilityEnabled) {
                 FloatingButtonToggleCard()
             }
+
+            OcrModelCard()
 
             Button(
                 onClick = {
@@ -299,6 +305,102 @@ private fun FloatingButtonToggleCard() {
                     MyAccessibilityService.setFloatingButtonEnabled(context, checked)
                 }
             )
+        }
+    }
+}
+
+/**
+ * بطاقة نموذج العربية الدقيق للتعرّف الضوئي: تنزيله مرة واحدة عند الحاجة
+ * بدل تضمينه في APK لكل المستخدمين (انظر [OcrModelManager]).
+ */
+@Composable
+private fun OcrModelCard() {
+    val context = LocalContext.current
+    val state by OcrModelManager.state.collectAsState()
+
+    LaunchedEffect(Unit) { OcrModelManager.refresh(context) }
+
+    val sizeLabel = String.format(
+        Locale.US,
+        "%.1f",
+        OcrModelManager.BEST_ARABIC_SIZE_BYTES / 1_000_000f
+    )
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = stringResource(id = R.string.ocr_model_title),
+                fontWeight = FontWeight.Bold
+            )
+
+            when (val current = state) {
+                OcrModelManager.State.NotInstalled -> {
+                    Text(
+                        text = stringResource(id = R.string.ocr_model_not_installed_desc),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Button(
+                        onClick = { OcrModelManager.startDownload(context) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(text = stringResource(id = R.string.ocr_model_download, sizeLabel))
+                    }
+                }
+
+                is OcrModelManager.State.Downloading -> {
+                    Text(
+                        text = stringResource(
+                            id = R.string.ocr_model_downloading,
+                            (current.progress * 100).toInt()
+                        ),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    LinearProgressIndicator(
+                        progress = { current.progress },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+
+                OcrModelManager.State.Installed -> {
+                    Text(
+                        text = stringResource(id = R.string.ocr_model_installed_desc),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedButton(
+                        onClick = { OcrModelManager.delete(context) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(text = stringResource(id = R.string.ocr_model_delete, sizeLabel))
+                    }
+                }
+
+                is OcrModelManager.State.Failed -> {
+                    Text(
+                        text = stringResource(
+                            id = when (current.reason) {
+                                OcrModelManager.Reason.NETWORK -> R.string.ocr_model_failed_network
+                                OcrModelManager.Reason.VERIFICATION -> R.string.ocr_model_failed_verification
+                                OcrModelManager.Reason.STORAGE -> R.string.ocr_model_failed_storage
+                            }
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                    Button(
+                        onClick = { OcrModelManager.startDownload(context) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(text = stringResource(id = R.string.ocr_model_retry))
+                    }
+                }
+            }
         }
     }
 }
