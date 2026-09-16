@@ -3,8 +3,6 @@ package com.oqod.textgrabber.ocr
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
-import android.graphics.ColorMatrix
-import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
 import android.graphics.Rect
 import android.util.Log
@@ -71,7 +69,7 @@ object OcrEngine {
             // وليست صفحة كاملة؛ هذا الوضع أدق لها من التحليل التلقائي للصفحة.
             tess.pageSegMode = TessBaseAPI.PageSegMode.PSM_SINGLE_BLOCK
             tess.setImage(prepared)
-            tess.getUTF8Text()?.trim()?.takeIf { it.isNotEmpty() }
+            tess.getUTF8Text()?.let(::cleanUp)?.takeIf { it.isNotEmpty() }
         } catch (t: Throwable) {
             Log.e(TAG, "خطأ أثناء التعرّف على النص", t)
             null
@@ -82,9 +80,23 @@ object OcrEngine {
     }
 
     /**
+     * تنظيف بسيط وآمن لنص Tesseract الخام: يشذّب كل سطر ويحذف الأسطر
+     * الفارغة المتكررة الناتجة عن فراغات في الصورة، دون لمس محتوى الأسطر
+     * نفسها حتى لا نخاطر بحذف نص حقيقي.
+     */
+    private fun cleanUp(raw: String): String =
+        raw.lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .joinToString(separator = "\n")
+
+    /**
      * تحسين الصورة قبل التعرّف: تكبير حتى ثلاثة أضعاف لبلوغ عرض مناسب، ثم
-     * تحويلها إلى تدرّج رمادي بتباين مرفوع. نص الشاشة نظيف (لا ميلان ولا
-     * ظلال) فهذا القدر من المعالجة يكفي ويعطي أفضل نتيجة مع Tesseract.
+     * تحويلها إلى أبيض وأسود صرف بعتبة Otsu التلقائية (بدل تدرّج رمادي
+     * بتباين ثابت). خلفيات الصور الزخرفية والملصقات تجمع ألوانا متعددة
+     * (نص ذهبي فوق دائرة بنفسجية مثلا) قد يتقارب سطوعها فيربك Tesseract حتى
+     * مع رفع التباين الخطي؛ التحويل الثنائي بعتبة محسوبة من توزيع الصورة
+     * نفسها يفصل الحروف عن أي خلفية ملوّنة بثبات أكبر.
      */
     private fun preprocess(source: Bitmap): Bitmap {
         val factor = (MIN_OCR_WIDTH_PX.toFloat() / source.width)
@@ -93,28 +105,89 @@ object OcrEngine {
         val targetWidth = (source.width * factor).toInt().coerceAtLeast(1)
         val targetHeight = (source.height * factor).toInt().coerceAtLeast(1)
 
-        val output = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(output)
-
-        val grayscale = ColorMatrix().apply { setSaturation(0f) }
-        // رفع التباين: يفصل الحروف عن الخلفية فيقلّ خلط الحروف المتشابهة.
-        val contrast = 1.6f
-        val translate = (-.5f * contrast + .5f) * 255f
-        val contrastMatrix = ColorMatrix(
-            floatArrayOf(
-                contrast, 0f, 0f, 0f, translate,
-                0f, contrast, 0f, 0f, translate,
-                0f, 0f, contrast, 0f, translate,
-                0f, 0f, 0f, 1f, 0f
-            )
-        )
-        grayscale.postConcat(contrastMatrix)
-
-        val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG).apply {
-            colorFilter = ColorMatrixColorFilter(grayscale)
-        }
+        val scaled = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(scaled)
+        val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
         canvas.drawBitmap(source, null, Rect(0, 0, targetWidth, targetHeight), paint)
+
+        return binarize(scaled).also { scaled.recycle() }
+    }
+
+    /**
+     * يحوّل الصورة إلى أبيض وأسود صرف باستخدام عتبة Otsu المحسوبة من
+     * توزيع درجات السطوع في الصورة نفسها، ثم يعكس الألوان إن كانت الكتلة
+     * الأكبر سوداء (نص فاتح فوق خلفية داكنة) حتى يخرج النص أسود دوما فوق
+     * خلفية بيضاء، وهو ما يتوقعه Tesseract.
+     */
+    private fun binarize(source: Bitmap): Bitmap {
+        val width = source.width
+        val height = source.height
+        val pixels = IntArray(width * height)
+        source.getPixels(pixels, 0, width, 0, 0, width, height)
+
+        val luminance = IntArray(pixels.size)
+        val histogram = IntArray(256)
+        for (i in pixels.indices) {
+            val p = pixels[i]
+            val r = (p shr 16) and 0xFF
+            val g = (p shr 8) and 0xFF
+            val b = p and 0xFF
+            val l = ((r * 299 + g * 587 + b * 114) / 1000).coerceIn(0, 255)
+            luminance[i] = l
+            histogram[l]++
+        }
+
+        val threshold = otsuThreshold(histogram, pixels.size)
+
+        var blackCount = 0
+        for (i in pixels.indices) {
+            if (luminance[i] <= threshold) blackCount++
+        }
+        // النص يشغل عادة جزءا أصغر من الصورة؛ إن كانت الكتلة السوداء هي
+        // الأكبر فالخلفية داكنة والنص فاتح، فنعكس حتى يبقى النص أسود دوما.
+        val invert = blackCount > pixels.size / 2
+
+        for (i in pixels.indices) {
+            val isInk = luminance[i] <= threshold
+            val black = if (invert) !isInk else isInk
+            pixels[i] = if (black) 0xFF000000.toInt() else 0xFFFFFFFF.toInt()
+        }
+
+        val output = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        output.setPixels(pixels, 0, width, 0, 0, width, height)
         return output
+    }
+
+    /** طريقة Otsu لإيجاد عتبة الفصل المثلى بين درجتي سطوع في الصورة. */
+    private fun otsuThreshold(histogram: IntArray, totalPixels: Int): Int {
+        if (totalPixels == 0) return 128
+
+        var sumAll = 0.0
+        for (t in 0..255) sumAll += t * histogram[t]
+
+        var sumBackground = 0.0
+        var weightBackground = 0
+        var maxVariance = -1.0
+        var threshold = 128
+
+        for (t in 0..255) {
+            weightBackground += histogram[t]
+            if (weightBackground == 0) continue
+            val weightForeground = totalPixels - weightBackground
+            if (weightForeground == 0) break
+
+            sumBackground += t * histogram[t]
+            val meanBackground = sumBackground / weightBackground
+            val meanForeground = (sumAll - sumBackground) / weightForeground
+
+            val variance = weightBackground.toDouble() * weightForeground.toDouble() *
+                (meanBackground - meanForeground) * (meanBackground - meanForeground)
+            if (variance > maxVariance) {
+                maxVariance = variance
+                threshold = t
+            }
+        }
+        return threshold
     }
 
     /**
