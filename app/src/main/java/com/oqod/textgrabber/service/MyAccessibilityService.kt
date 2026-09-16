@@ -6,11 +6,13 @@ import android.accessibilityservice.AccessibilityService.TakeScreenshotCallback
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
@@ -19,9 +21,12 @@ import android.graphics.RectF
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import androidx.annotation.RequiresApi
 import androidx.core.os.BundleCompat
 import android.provider.MediaStore
+import android.util.Log
 import android.util.TypedValue
 import android.view.Display
 import android.view.Gravity
@@ -53,7 +58,13 @@ import kotlin.math.abs
 class MyAccessibilityService : AccessibilityService() {
 
     companion object {
+        private const val TAG = "TextGrabberService"
         private const val CHANNEL_ID = "text_grabber_channel"
+
+        // حارس أمان طبقة التحديد: نفحص كل 15 ثانية، ونزيل الطبقة إن مضت
+        // دقيقتان بلا أي لمس (غادر المستخدم السياق وتركها معلّقة).
+        private const val SELECTION_IDLE_CHECK_MS = 15_000L
+        private const val SELECTION_IDLE_TIMEOUT_MS = 120_000L
         private const val NOTIFICATION_ID_TEXT = 1001
         private const val NOTIFICATION_ID_IMAGE = 1002
         private const val MAX_SNIPPET_LENGTH = 60
@@ -104,12 +115,39 @@ class MyAccessibilityService : AccessibilityService() {
     // منفذ تنفيذ منفصل لمعالجة نتيجة التقاط الشاشة (takeScreenshot) خارج الخيط الرئيسي
     private val screenshotExecutor = Executors.newSingleThreadExecutor()
 
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    /**
+     * عند انطفاء الشاشة نزيل طبقة التحديد فورا: المستخدم غادر السياق ولن
+     * يُكمل التحديد، وبقاؤها يجعل الزر العائم غير قابل للضغط عند العودة.
+     */
+    private val screenOffReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == Intent.ACTION_SCREEN_OFF) {
+                removeSelectionOverlay()
+            }
+        }
+    }
+    private var screenOffReceiverRegistered = false
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         instance = this
         createNotificationChannelIfNeeded()
+        registerScreenOffReceiver()
         applyFloatingButtonVisibility(isFloatingButtonEnabled(this))
+    }
+
+    private fun registerScreenOffReceiver() {
+        if (screenOffReceiverRegistered) return
+        runCatching {
+            registerReceiver(screenOffReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF))
+        }.onSuccess {
+            screenOffReceiverRegistered = true
+        }.onFailure {
+            Log.e(TAG, "تعذّر تسجيل مستقبل انطفاء الشاشة", it)
+        }
     }
 
     private fun applyFloatingButtonVisibility(enabled: Boolean) {
@@ -126,7 +164,13 @@ class MyAccessibilityService : AccessibilityService() {
     // ---------------------------------------------------------------------
 
     private fun addFloatingButton() {
-        if (floatingButtonView != null) return
+        // تعافٍ ذاتي: إن بقي مرجع لعرض لم يعد مرتبطا فعليا بنافذة (فشل إضافة
+        // سابق، أو أزاله النظام)، ننظّفه بدل أن نرتد ونترك الزر مختفيا للأبد.
+        floatingButtonView?.let { existing ->
+            if (existing.isAttachedToWindow) return
+            Log.w(TAG, "مرجع زر عائم قديم غير مرتبط بنافذة — يُنظَّف ويُعاد إنشاؤه")
+            removeFloatingButton()
+        }
 
         val sizePx = dpToPx(56)
         val button = TextView(this).apply {
@@ -222,7 +266,18 @@ class MyAccessibilityService : AccessibilityService() {
             }
         }
 
-        runCatching { windowManager.addView(button, params) }
+        // لا نُسنِد المراجع إلا بعد نجاح addView فعليا. كان الإسناد سابقا غير
+        // مشروط، فإن فشلت الإضافة مرة واحدة (رمز نافذة منتهٍ بعد إعادة ربط
+        // الخدمة، أو موت العملية) يبقى floatingButtonView مملوءا بعرض لم يُضف،
+        // فيرتد addFloatingButton() من حارس "if (floatingButtonView != null)"
+        // إلى الأبد: الزر لا يظهر ولا تستجيب البلاطة حتى إعادة تشغيل الجهاز.
+        val added = runCatching { windowManager.addView(button, params) }
+        if (added.isFailure) {
+            Log.e(TAG, "فشل إضافة الزر العائم إلى WindowManager", added.exceptionOrNull())
+            floatingButtonView = null
+            floatingButtonParams = null
+            return
+        }
         floatingButtonView = button
         floatingButtonParams = params
     }
@@ -268,7 +323,13 @@ class MyAccessibilityService : AccessibilityService() {
             y = screenHeight - dpToPx(140)
         }
 
-        runCatching { windowManager.addView(view, params) }
+        val added = runCatching { windowManager.addView(view, params) }
+        if (added.isFailure) {
+            Log.e(TAG, "فشل إضافة منطقة الإغلاق إلى WindowManager", added.exceptionOrNull())
+            closeZoneView = null
+            closeZoneParams = null
+            return
+        }
         closeZoneView = view
         closeZoneParams = params
     }
@@ -311,7 +372,13 @@ class MyAccessibilityService : AccessibilityService() {
     // ---------------------------------------------------------------------
 
     private fun startSelectionMode() {
-        if (selectionOverlayView != null) return
+        // نفس التعافي الذاتي: مرجع طبقة تحديد قديمة غير مرتبطة بنافذة كان
+        // يقفل الزر العائم نهائيا (الضغط عليه لا يفعل شيئا).
+        selectionOverlayView?.let { existing ->
+            if (existing.isAttachedToWindow) return
+            Log.w(TAG, "مرجع طبقة تحديد قديمة غير مرتبطة بنافذة — يُنظَّف")
+            removeSelectionOverlay()
+        }
 
         Toast.makeText(
             this,
@@ -345,13 +412,42 @@ class MyAccessibilityService : AccessibilityService() {
             y = 0
         }
 
-        runCatching { windowManager.addView(overlay, params) }
+        val added = runCatching { windowManager.addView(overlay, params) }
+        if (added.isFailure) {
+            Log.e(TAG, "فشل إضافة طبقة التحديد إلى WindowManager", added.exceptionOrNull())
+            selectionOverlayView = null
+            return
+        }
         selectionOverlayView = overlay
+        scheduleSelectionOverlayWatchdog()
     }
 
     private fun removeSelectionOverlay() {
+        mainHandler.removeCallbacks(selectionOverlayWatchdog)
         selectionOverlayView?.let { runCatching { windowManager.removeView(it) } }
         selectionOverlayView = null
+    }
+
+    /**
+     * حارس أمان لطبقة التحديد: منذ الإصدار 1.3.0 صارت الطبقة تبقى في "وضع
+     * التأكيد" حتى يضغط المستخدم "نسخ" أو "صورة"، فإن غادر السياق (شاشة
+     * الرئيسية، تبديل تطبيق) بقيت الطبقة تغطي الشاشة وتبتلع كل اللمسات،
+     * فيبدو الزر العائم ميتا. هنا نزيلها تلقائيا بعد فترة خمول بلا أي لمس.
+     */
+    private fun scheduleSelectionOverlayWatchdog() {
+        mainHandler.removeCallbacks(selectionOverlayWatchdog)
+        mainHandler.postDelayed(selectionOverlayWatchdog, SELECTION_IDLE_CHECK_MS)
+    }
+
+    private val selectionOverlayWatchdog: Runnable = Runnable {
+        val overlay = selectionOverlayView ?: return@Runnable
+        val idleMs = System.currentTimeMillis() - overlay.lastTouchAtMs
+        if (idleMs >= SELECTION_IDLE_TIMEOUT_MS) {
+            Log.w(TAG, "إزالة طبقة تحديد خاملة منذ ${idleMs}ms")
+            removeSelectionOverlay()
+        } else {
+            mainHandler.postDelayed(selectionOverlayWatchdog, SELECTION_IDLE_CHECK_MS)
+        }
     }
 
     private fun handleCopyText(selectedRect: Rect) {
@@ -417,6 +513,15 @@ class MyAccessibilityService : AccessibilityService() {
     /** يلتقط لقطة لكامل الشاشة الحالية عبر AccessibilityService.takeScreenshot (يتطلب أندرويد 11+). */
     @RequiresApi(Build.VERSION_CODES.R)
     private fun captureScreenshot(onResult: (Bitmap?) -> Unit) {
+        val requested = runCatching { requestScreenshot(onResult) }
+        if (requested.isFailure) {
+            Log.e(TAG, "تعذّر طلب لقطة الشاشة", requested.exceptionOrNull())
+            onResult(null)
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.R)
+    private fun requestScreenshot(onResult: (Bitmap?) -> Unit) {
         takeScreenshot(
             Display.DEFAULT_DISPLAY,
             screenshotExecutor,
@@ -440,7 +545,7 @@ class MyAccessibilityService : AccessibilityService() {
     }
 
     private fun mainHandlerPost(action: () -> Unit) {
-        android.os.Handler(mainLooper).post(action)
+        mainHandler.post(action)
     }
 
     private fun cropBitmapToRect(source: Bitmap, target: Rect): Bitmap {
@@ -684,9 +789,14 @@ class MyAccessibilityService : AccessibilityService() {
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
-        selectionOverlayView?.let { runCatching { windowManager.removeView(it) } }
-        selectionOverlayView = null
+        removeSelectionOverlay()
         removeFloatingButton()
+        if (screenOffReceiverRegistered) {
+            runCatching { unregisterReceiver(screenOffReceiver) }
+            screenOffReceiverRegistered = false
+        }
+        // بدون هذا الإغلاق يتراكم خيط تنفيذ جديد مع كل إعادة ربط للخدمة.
+        runCatching { screenshotExecutor.shutdownNow() }
         instance = null
         return super.onUnbind(intent)
     }

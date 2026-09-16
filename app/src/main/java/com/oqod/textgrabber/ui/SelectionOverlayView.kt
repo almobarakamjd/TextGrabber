@@ -195,7 +195,16 @@ class SelectionOverlayView(
         imageButtonRect.set(imageLeft, top, imageLeft + buttonWidthPx, top + buttonHeightPx)
     }
 
+    /**
+     * وقت آخر لمسة على الطبقة. تقرأه الخدمة لتزيل الطبقة تلقائيا إن بقيت
+     * معلّقة بلا تفاعل (مثلا غادر المستخدم إلى تطبيق آخر وهي في وضع
+     * التأكيد)، لأن بقاءها يبتلع كل اللمسات ويجعل الزر العائم يبدو ميتا.
+     */
+    var lastTouchAtMs: Long = System.currentTimeMillis()
+        private set
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        lastTouchAtMs = System.currentTimeMillis()
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> return handleDown(event)
             MotionEvent.ACTION_MOVE -> return handleMove(event)
