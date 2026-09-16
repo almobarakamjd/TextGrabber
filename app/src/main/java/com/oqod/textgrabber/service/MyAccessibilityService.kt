@@ -40,7 +40,11 @@ import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import com.oqod.textgrabber.MainActivity
 import com.oqod.textgrabber.R
+import com.oqod.textgrabber.capture.Box
 import com.oqod.textgrabber.capture.CopyMode
+import com.oqod.textgrabber.capture.MixedContentComposer
+import com.oqod.textgrabber.capture.PlacedText
+import com.oqod.textgrabber.capture.ScreenWord
 import com.oqod.textgrabber.capture.SelectionAnalyzer
 import com.oqod.textgrabber.capture.TextBlock
 import com.oqod.textgrabber.data.CopiedTextStore
@@ -92,6 +96,19 @@ class MyAccessibilityService : AccessibilityService() {
         // إزالة نافذة من WindowManager لا تنعكس على الشاشة فورا؛ ننتظر
         // لحظة قبل الالتقاط وإلا ظهر الزر العائم داخل الصورة الملتقطة.
         private const val WINDOW_REMOVAL_DELAY_MS = 180L
+
+        // أصغر عنصر صورة يُقرأ في النسخ المركب. الحد مقصود لاستبعاد الأيقونات
+        // والصور الشخصية الصغيرة (40-56dp) التي لا تحوي نصا، بينما الصور
+        // والملصقات التي تحمل كتابة تكون أكبر من ذلك عادة.
+        private const val MIN_IMAGE_WIDTH_DP = 96
+        private const val MIN_IMAGE_HEIGHT_DP = 32
+
+        // حين لا تكشف الواجهة عناصر صور، نعتبر المربع مركبا فقط إن كانت
+        // المساحة الخالية من النص معتبرة، لا مجرد تباعد بين الفقرات.
+        private const val MIN_UNCOVERED_RATIO_FOR_MIXED = 0.35f
+
+        // عنصرا صورة يُدمجان في منطقة واحدة إن تداخلا بهذه النسبة من الأصغر.
+        private const val IMAGE_MERGE_OVERLAP_RATIO = 0.5f
         private const val NOTIFICATION_ID_TEXT = 1001
         private const val NOTIFICATION_ID_IMAGE = 1002
         private const val MAX_SNIPPET_LENGTH = 60
@@ -492,12 +509,85 @@ class MyAccessibilityService : AccessibilityService() {
      */
     private fun analyzeSelection(selectedRect: Rect): CopyMode {
         val bounds = collectTextBounds(selectedRect)
-        val bands = SelectionAnalyzer.findImageBands(selectedRect, bounds)
-        return when {
-            bounds.isNotEmpty() && bands.isNotEmpty() -> CopyMode.MIXED
-            bounds.isNotEmpty() -> CopyMode.TEXT
-            else -> CopyMode.IMAGE
+        if (bounds.isEmpty()) return CopyMode.IMAGE
+        if (collectImageRegions(selectedRect).isNotEmpty()) return CopyMode.MIXED
+
+        // احتياط للتطبيقات التي ترسم صورها بنفسها فلا تظهر عناصر صور في
+        // الواجهة: نعتمد على المساحة الخالية من النص، بشرط أن تكون معتبرة.
+        val uncovered = SelectionAnalyzer.findImageBands(selectedRect, bounds)
+            .sumOf { it.height() }
+        val ratio = uncovered.toFloat() / selectedRect.height().coerceAtLeast(1)
+        return if (ratio >= MIN_UNCOVERED_RATIO_FOR_MIXED) CopyMode.MIXED else CopyMode.TEXT
+    }
+
+    /**
+     * يكتشف عناصر الصور داخل المربع **بحدودها الحقيقية** من شجرة الواجهة،
+     * لتُقرأ كل صورة وحدها بسياقها الكامل في النسخ المركب.
+     *
+     * أصناف الصور المعتمدة تغطي الحالات الشائعة: `ImageView` في التطبيقات
+     * الأصلية وفي Compose (يعرّف صوره بهذا الصنف)، و`android.widget.Image`
+     * في Chrome وWebView. أما `ImageButton` فمستبعد لأنه أيقونات أزرار.
+     */
+    private fun collectImageRegions(target: Rect): List<Rect> {
+        val root = rootInActiveWindow ?: return emptyList()
+        val found = mutableListOf<Rect>()
+        try {
+            collectImageRegionsRecursive(root, target, found)
+        } finally {
+            root.recycle()
         }
+        return mergeOverlappingRegions(found)
+    }
+
+    private fun collectImageRegionsRecursive(
+        node: AccessibilityNodeInfo,
+        target: Rect,
+        result: MutableList<Rect>
+    ) {
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+        if (!Rect.intersects(bounds, target)) return
+
+        if (node.isVisibleToUser && isImageNode(node)) {
+            val clipped = Rect(bounds)
+            if (clipped.intersect(target) &&
+                clipped.width() >= dpToPx(MIN_IMAGE_WIDTH_DP) &&
+                clipped.height() >= dpToPx(MIN_IMAGE_HEIGHT_DP)
+            ) {
+                result.add(clipped)
+            }
+        }
+
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            collectImageRegionsRecursive(child, target, result)
+            child.recycle()
+        }
+    }
+
+    private fun isImageNode(node: AccessibilityNodeInfo): Boolean {
+        val className = node.className?.toString() ?: return false
+        return className == "android.widget.ImageView" ||
+            className == "android.widget.Image" ||
+            className.endsWith(".ImageView")
+    }
+
+    /**
+     * صورة داخل صورة (غلاف وصورته، أو طبقات متراكبة) تُقرأ مرة واحدة: ندمج
+     * كل منطقتين متداخلتين بنصف مساحة الأصغر على الأقل.
+     */
+    private fun mergeOverlappingRegions(regions: List<Rect>): List<Rect> {
+        val merged = mutableListOf<Rect>()
+        for (region in regions.sortedByDescending { it.width().toLong() * it.height() }) {
+            val area = region.width().toLong() * region.height()
+            val host = merged.firstOrNull { existing ->
+                val overlap = Rect()
+                overlap.setIntersect(existing, region) &&
+                    overlap.width().toLong() * overlap.height() >= area * IMAGE_MERGE_OVERLAP_RATIO
+            }
+            if (host != null) host.union(region) else merged.add(Rect(region))
+        }
+        return merged
     }
 
     /** حدود كل عنصر نصي يقع فعليا داخل المربع (بلا استخراج النص نفسه). */
@@ -623,18 +713,41 @@ class MyAccessibilityService : AccessibilityService() {
         mode: CopyMode,
         onResult: (List<TextBlock>) -> Unit
     ) {
-        val uiBlocks = if (mode == CopyMode.IMAGE) emptyList() else collectTextBlocks(target)
-        val bands = if (mode == CopyMode.TEXT) {
-            emptyList()
-        } else {
-            SelectionAnalyzer.findImageBands(target, uiBlocks.map { it.bounds })
-                .ifEmpty { listOf(Rect(target)) }
+        when (mode) {
+            CopyMode.TEXT -> onResult(collectTextBlocks(target))
+            CopyMode.IMAGE -> captureWholeBoxOcr(target, onResult)
+            CopyMode.MIXED -> captureMixed(target, onResult)
         }
+    }
 
-        if (bands.isEmpty()) {
-            onResult(uiBlocks)
-            return
+    /** "نسخ OCR": المربع كله يُقرأ دفعة واحدة بسياقه الكامل. */
+    private fun captureWholeBoxOcr(target: Rect, onResult: (List<TextBlock>) -> Unit) {
+        captureCrop(target) { cropped ->
+            if (cropped == null) {
+                onResult(emptyList())
+                return@captureCrop
+            }
+            runOnOcrThread(onFailure = { cropped.recycle(); onResult(emptyList()) }) {
+                val text = OcrEngine.recognize(this, cropped)
+                cropped.recycle()
+                mainHandlerPost {
+                    onResult(listOfNotNull(text?.let { TextBlock(it, target.top, Rect(target)) }))
+                }
+            }
         }
+    }
+
+    /**
+     * "نسخ مركب": كل صورة في المربع تُقصّ **وحدها** وتُقرأ بسياقها الكامل،
+     * ونص الواجهة يؤخذ كما هو لأنه لا يخطئ، ثم يُركَّب الكل حسب موضعه على
+     * الشاشة ([MixedContentComposer]).
+     *
+     * إن لم تكشف الواجهة أي عنصر صورة (تطبيق يرسم صوره بنفسه)، يُقرأ المربع
+     * كاملا دفعة واحدة، ويحذف المركِّب من نتيجته ما يقع فوق نص الواجهة.
+     */
+    private fun captureMixed(target: Rect, onResult: (List<TextBlock>) -> Unit) {
+        val uiBlocks = collectTextBlocks(target)
+        val regions = collectImageRegions(target).ifEmpty { listOf(Rect(target)) }
 
         captureScreenshot { fullBitmap ->
             if (fullBitmap == null) {
@@ -642,8 +755,14 @@ class MyAccessibilityService : AccessibilityService() {
                 return@captureScreenshot
             }
 
-            val crops = bands.mapNotNull { band ->
-                runCatching { cropBitmapToRect(fullBitmap, band) }.getOrNull()?.let { band to it }
+            // موضع كل قصاصة على الشاشة بعد حصرها داخل حدود اللقطة، لإرجاع
+            // مواضع كلماتها إلى إحداثيات الشاشة.
+            val crops = regions.mapNotNull { region ->
+                val cropped = runCatching { cropBitmapToRect(fullBitmap, region) }.getOrNull()
+                    ?: return@mapNotNull null
+                val originX = region.left.coerceIn(0, fullBitmap.width)
+                val originY = region.top.coerceIn(0, fullBitmap.height)
+                Triple(originX, originY, cropped)
             }
             fullBitmap.recycle()
 
@@ -652,22 +771,49 @@ class MyAccessibilityService : AccessibilityService() {
                 return@captureScreenshot
             }
 
-            runCatching {
-                screenshotExecutor.execute {
-                    val ocrBlocks = crops.mapNotNull { (band, bitmap) ->
-                        val text = OcrEngine.recognize(this, bitmap)
-                        bitmap.recycle()
-                        text?.let { TextBlock(it, band.top, Rect(band)) }
-                    }
-                    mainHandlerPost { onResult(uiBlocks + ocrBlocks) }
+            runOnOcrThread(onFailure = { crops.forEach { it.third.recycle() }; onResult(uiBlocks) }) {
+                val results = OcrEngine.recognizeWords(this, crops.map { it.third })
+                crops.forEach { it.third.recycle() }
+
+                if (results == null) {
+                    mainHandlerPost { onResult(uiBlocks) }
+                    return@runOnOcrThread
                 }
-            }.onFailure {
-                Log.e(TAG, "تعذّر جدولة مهمة التعرّف على النص", it)
-                crops.forEach { (_, bitmap) -> bitmap.recycle() }
-                onResult(uiBlocks)
+
+                val screenWords = results.flatMapIndexed { index, words ->
+                    val (originX, originY) = crops[index]
+                    words.map { word ->
+                        ScreenWord(
+                            word = word,
+                            region = index,
+                            box = Box(
+                                originX + word.left,
+                                originY + word.top,
+                                originX + word.right,
+                                originY + word.bottom
+                            )
+                        )
+                    }
+                }
+
+                val composed = MixedContentComposer.compose(uiBlocks.map { it.toPlacedText() }, screenWords)
+                mainHandlerPost { onResult(composed.map { it.toTextBlock() }) }
             }
         }
     }
+
+    private fun runOnOcrThread(onFailure: () -> Unit, task: () -> Unit) {
+        runCatching { screenshotExecutor.execute(task) }.onFailure {
+            Log.e(TAG, "تعذّر جدولة مهمة التعرّف على النص", it)
+            onFailure()
+        }
+    }
+
+    private fun TextBlock.toPlacedText() =
+        PlacedText(text, Box(bounds.left, top, bounds.right, top + bounds.height()))
+
+    private fun PlacedText.toTextBlock() =
+        TextBlock(text, box.top, Rect(box.left, box.top, box.right, box.bottom))
 
     private fun deliverText(text: String) {
         if (text.isBlank()) {

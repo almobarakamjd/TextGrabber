@@ -89,22 +89,19 @@ object OcrEngine {
 
         val tess = createInitializedApi(bestDataPath, fastDataPath)
         if (tess == null) {
-            if (prepared !== bitmap) prepared.recycle()
+            prepared.bitmap.recycle()
             return null
         }
 
         return try {
-            // الصورة مقصوصة أصلا على مربع اختاره المستخدم، فهي كتلة نص واحدة
-            // وليست صفحة كاملة؛ هذا الوضع أدق لها من التحليل التلقائي للصفحة.
-            tess.pageSegMode = TessBaseAPI.PageSegMode.PSM_SINGLE_BLOCK
-            tess.setVariable("user_defined_dpi", ASSUMED_DPI)
-            tess.setImage(prepared)
+            configure(tess)
+            tess.setImage(prepared.bitmap)
 
             // getUTF8Text هو ما يشغّل التعرّف فعليا؛ يجب استدعاؤه قبل المكرِّر.
             val raw = tess.getUTF8Text().orEmpty()
             if (raw.isBlank()) return null
 
-            val cleaned = runCatching { OcrTextCleaner.clean(collectWords(tess)) }
+            val cleaned = runCatching { OcrTextCleaner.clean(collectWords(tess, prepared)) }
                 .getOrElse {
                     Log.w(TAG, "تعذّرت قراءة درجات الثقة، يُنظَّف النص الخام بدلا منها", it)
                     OcrTextCleaner.cleanRaw(raw)
@@ -115,8 +112,61 @@ object OcrEngine {
             null
         } finally {
             runCatching { tess.recycle() }
-            if (prepared !== bitmap) prepared.recycle()
+            prepared.bitmap.recycle()
         }
+    }
+
+    /**
+     * يقرأ عدة صور **بمحرّك واحد** ويعيد لكل صورة كلماتها مع مواضعها بإحداثيات
+     * تلك الصورة الأصلية. يستخدمه النسخ المركب، حيث تُقرأ كل صورة في الصفحة
+     * وحدها. تهيئة المحرّك مرة واحدة مهمة هنا: تحميل النموذج الدقيق وحده قد
+     * يستغرق نصف ثانية، فتكرارها لكل صورة يضاعف الزمن بلا فائدة.
+     *
+     * يعيد `null` إن تعذّرت تهيئة المحرّك أصلا، وقائمة فارغة لكل صورة فشلت
+     * قراءتها وحدها. **يجب استدعاؤها من خيط خلفي**.
+     */
+    fun recognizeWords(context: Context, bitmaps: List<Bitmap>): List<List<OcrWord>>? {
+        if (bitmaps.isEmpty()) return emptyList()
+
+        val fastDataPath = runCatching { prepareFastDataPath(context) }.getOrElse {
+            Log.e(TAG, "تعذّر تجهيز ملفات لغة Tesseract", it)
+            return null
+        }
+        val bestDataPath = OcrModelManager.bestDataPath(context).absolutePath
+            .takeIf { OcrModelManager.isInstalled(context) }
+
+        val tess = createInitializedApi(bestDataPath, fastDataPath) ?: return null
+        return try {
+            configure(tess)
+            bitmaps.map { bitmap -> recognizeOne(tess, bitmap) }
+        } finally {
+            runCatching { tess.recycle() }
+        }
+    }
+
+    private fun recognizeOne(tess: TessBaseAPI, bitmap: Bitmap): List<OcrWord> {
+        val prepared = runCatching { preprocess(bitmap) }.getOrElse {
+            Log.e(TAG, "تعذّرت معالجة صورة قبل التعرّف", it)
+            return emptyList()
+        }
+        return try {
+            tess.setImage(prepared.bitmap)
+            if (tess.getUTF8Text().isNullOrBlank()) emptyList() else collectWords(tess, prepared)
+        } catch (t: Throwable) {
+            Log.e(TAG, "خطأ أثناء التعرّف على إحدى الصور", t)
+            emptyList()
+        } finally {
+            // يحرر نتائج الصورة السابقة وصورتها قبل التالية؛ الإعدادات تبقى.
+            runCatching { tess.clear() }
+            prepared.bitmap.recycle()
+        }
+    }
+
+    private fun configure(tess: TessBaseAPI) {
+        // الصورة مقصوصة أصلا على مربع اختاره المستخدم أو على عنصر صورة واحد،
+        // فهي كتلة نص واحدة وليست صفحة كاملة؛ هذا الوضع أدق لها.
+        tess.pageSegMode = TessBaseAPI.PageSegMode.PSM_SINGLE_BLOCK
+        tess.setVariable("user_defined_dpi", ASSUMED_DPI)
     }
 
     /**
@@ -148,7 +198,7 @@ object OcrEngine {
      * يقرأ كل كلمة مع درجة ثقة المحرك بها ورقم سطرها. درجة الثقة هي ما
      * يسمح لـ[OcrTextCleaner] باستبعاد التشويش الناتج عن الزخارف والحواف.
      */
-    private fun collectWords(tess: TessBaseAPI): List<OcrWord> {
+    private fun collectWords(tess: TessBaseAPI, prepared: Prepared): List<OcrWord> {
         val iterator = tess.resultIterator ?: return emptyList()
         val words = mutableListOf<OcrWord>()
         var line = -1
@@ -159,13 +209,39 @@ object OcrEngine {
                 val text = iterator.getUTF8Text(TessBaseAPI.PageIteratorLevel.RIL_WORD)
                 if (!text.isNullOrBlank()) {
                     val confidence = iterator.confidence(TessBaseAPI.PageIteratorLevel.RIL_WORD)
-                    words.add(OcrWord(text, confidence, line.coerceAtLeast(0)))
+                    val box = iterator.getBoundingRect(TessBaseAPI.PageIteratorLevel.RIL_WORD)
+                    words.add(
+                        OcrWord(
+                            text = text,
+                            confidence = confidence,
+                            line = line.coerceAtLeast(0),
+                            left = prepared.toSourceX(box.left),
+                            top = prepared.toSourceY(box.top),
+                            right = prepared.toSourceX(box.right),
+                            bottom = prepared.toSourceY(box.bottom)
+                        )
+                    )
                 }
             } while (iterator.next(TessBaseAPI.PageIteratorLevel.RIL_WORD))
         } finally {
             iterator.delete()
         }
         return words
+    }
+
+    /**
+     * الصورة بعد التجهيز، مع ما يلزم لإرجاع مواضع الكلمات إلى إحداثيات
+     * الصورة الأصلية: التجهيز كبّرها بمعامل [factor] وأضاف هامشا [padding].
+     */
+    private class Prepared(
+        val bitmap: Bitmap,
+        val factor: Float,
+        val padding: Int,
+        val sourceWidth: Int,
+        val sourceHeight: Int
+    ) {
+        fun toSourceX(x: Int) = ((x - padding) / factor).toInt().coerceIn(0, sourceWidth)
+        fun toSourceY(y: Int) = ((y - padding) / factor).toInt().coerceIn(0, sourceHeight)
     }
 
     /**
@@ -176,7 +252,7 @@ object OcrEngine {
      * (مثل ملصق ذهبي على بنفسجي) يصنع الهامش الأبيض حافة حادة جديدة تُقرأ
      * خطا عموديا "|"، أي أنه يضيف التشويش الذي جاء ليزيله.
      */
-    private fun preprocess(source: Bitmap): Bitmap {
+    private fun preprocess(source: Bitmap): Prepared {
         val factor = (MIN_OCR_WIDTH_PX.toFloat() / source.width)
             .coerceIn(1f, MAX_UPSCALE_FACTOR)
 
@@ -225,7 +301,7 @@ object OcrEngine {
             Rect(padding, padding, padding + scaledWidth, padding + scaledHeight),
             paint
         )
-        return output
+        return Prepared(output, factor, padding, source.width, source.height)
     }
 
     /** متوسط لون البكسلات على الحواف الأربع للصورة (بعيّنة لا بكل بكسل). */

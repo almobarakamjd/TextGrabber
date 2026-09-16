@@ -2,9 +2,19 @@ package com.oqod.textgrabber.ocr
 
 /**
  * كلمة واحدة كما أخرجها Tesseract، مع درجة ثقته بها (0-100) ورقم السطر
- * الذي تنتمي إليه.
+ * الذي تنتمي إليه، وموضعها داخل الصورة التي قُرئت منها (بإحداثيات تلك
+ * الصورة الأصلية قبل التكبير والهامش). الموضع يستخدمه النسخ المركب لترتيب
+ * نص الصور بين نصوص الواجهة، ولحذف ما يتكرر منها.
  */
-data class OcrWord(val text: String, val confidence: Float, val line: Int)
+data class OcrWord(
+    val text: String,
+    val confidence: Float,
+    val line: Int,
+    val left: Int = 0,
+    val top: Int = 0,
+    val right: Int = 0,
+    val bottom: Int = 0
+)
 
 /**
  * تنظيف ناتج التعرّف الضوئي قبل نسخه.
@@ -69,6 +79,18 @@ object OcrTextCleaner {
             .map { lineWords -> cleanLine(lineWords.map { Token(it.text, it.confidence) }) }
             .filter { it.isNotEmpty() }
             .joinToString(separator = "\n")
+    }
+
+    /**
+     * ينظّف كلمات **سطر واحد** (يُفترض أنها من نفس السطر) ويعيد نصه، أو نصا
+     * فارغا إن كان كله تشويشا. يستخدمه النسخ المركب الذي يرتب كل سطر وحده.
+     */
+    fun cleanLineWords(words: List<OcrWord>): String {
+        return cleanLine(
+            words
+                .filter { it.confidence >= MIN_WORD_CONFIDENCE }
+                .map { Token(it.text, it.confidence) }
+        )
     }
 
     /** للحالات التي لا تتوفر فيها درجات الثقة: ينظّف نصا خاما سطرا سطرا. */

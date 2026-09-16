@@ -13,8 +13,8 @@ android {
         applicationId = "com.oqod.textgrabber"
         minSdk = 26
         targetSdk = 36
-        versionCode = 10
-        versionName = "1.4.1"
+        versionCode = 11
+        versionName = "1.4.2"
 
         // مكتبة Tesseract أصلية (native)؛ نقتصر على معماريتي الهواتف الحقيقية
         // ونستبعد x86/x86_64 الخاصة بالمحاكيات، فيصغر حجم APK نحو 8 ميجابايت.
